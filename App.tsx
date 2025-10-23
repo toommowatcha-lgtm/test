@@ -5,6 +5,7 @@ import HomePage from './pages/HomePage';
 import DetailPage from './pages/DetailPage';
 import FinancialsPage from './pages/FinancialsPage';
 import EarningCallStoryPage from './pages/EarningCallStoryPage';
+import ValuationPage from './pages/ValuationPage';
 
 const App: React.FC = () => {
   return (
@@ -15,6 +16,7 @@ const App: React.FC = () => {
           <Route path="/stock/:stockId" element={<DetailPage />} />
           <Route path="/stock/:stockId/financials" element={<FinancialsPage />} />
           <Route path="/stock/:stockId/earning-call-story" element={<EarningCallStoryPage />} />
+          <Route path="/stock/:stockId/valuation" element={<ValuationPage />} />
         </Routes>
       </div>
     </HashRouter>

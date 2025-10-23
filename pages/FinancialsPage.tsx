@@ -88,7 +88,6 @@ const FinancialsPage: React.FC = () => {
 
     const dataProcessor = useMemo(() => {
         const quarterlyFinancials = financials.filter(f => /^Q[1-4]\s\d{4}$/.test(f.period_label));
-        // FIX: Using Array.from for better type inference to ensure allMetrics is string[].
         const allMetrics: string[] = Array.from(new Set(financials.map(f => f.metric_name))).sort();
 
         const periodSorter = (a: string, b: string) => {
@@ -102,7 +101,8 @@ const FinancialsPage: React.FC = () => {
             return getVal(a) - getVal(b);
         };
 
-        const quarterlyPeriods = [...new Set(quarterlyFinancials.map(f => f.period_label))].sort(periodSorter);
+        // FIX: Using Array.from for better type inference to ensure quarterlyPeriods is string[].
+        const quarterlyPeriods = Array.from(new Set(quarterlyFinancials.map(f => f.period_label))).sort(periodSorter);
         const quarterlyDataMap: Record<string, Record<string, FinancialMetric | undefined>> = {};
         quarterlyFinancials.forEach(f => {
             if (!quarterlyDataMap[f.metric_name]) quarterlyDataMap[f.metric_name] = {};
@@ -128,7 +128,8 @@ const FinancialsPage: React.FC = () => {
             }
         }
         
-        const annualPeriods = [...new Set(annualSummaries.map(f => f.period_label))].sort();
+        // FIX: Using Array.from for better type inference to ensure annualPeriods is string[].
+        const annualPeriods = Array.from(new Set(annualSummaries.map(f => f.period_label))).sort();
         const annualDataMap: Record<string, Record<string, FinancialMetric | undefined>> = {};
         annualSummaries.forEach(f => {
             if (!annualDataMap[f.metric_name]) annualDataMap[f.metric_name] = {};

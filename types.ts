@@ -63,6 +63,25 @@ export interface EarningCallStory {
     created_at?: string;
 }
 
+export interface Valuation {
+  id: number;
+  stock_id: string;
+  current_price: number;
+  investment_horizon_years: number;
+  current_sales_mm: number;
+  sales_growth_cagr_percent: number;
+  net_profit_margin_percent: number;
+  shares_outstanding_mm: number;
+  pe_at_year_end: number;
+  share_change_percent: number;
+  expected_return_percent: number;
+  margin_of_safety_percent: number;
+  tam_mm: number;
+  sam_mm: number;
+  created_at?: string;
+  updated_at?: string;
+}
+
 
 // Fix: Add StockQuote interface
 export interface StockQuote {
