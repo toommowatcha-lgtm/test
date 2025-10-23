@@ -132,7 +132,11 @@ const DetailPage: React.FC = () => {
             <header className="mb-8"><h1 className="text-5xl font-bold">{stock.symbol}</h1><p className="text-xl text-text-secondary">{stock.company}</p></header>
             
             <div className="border-b border-accent mb-8">
-                <nav className="-mb-px flex space-x-8"><span className="whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm border-primary text-primary">Business Overview</span><Link to={`/stock/${stockId}/financials`} className="whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm border-transparent text-text-secondary hover:text-text-primary hover:border-gray-300">Financials</Link></nav>
+                <nav className="-mb-px flex space-x-8">
+                    <span className="whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm border-primary text-primary">Business Overview</span>
+                    <Link to={`/stock/${stockId}/financials`} className="whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm border-transparent text-text-secondary hover:text-text-primary hover:border-gray-300">Financials</Link>
+                    <Link to={`/stock/${stockId}/earning-call-story`} className="whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm border-transparent text-text-secondary hover:text-text-primary hover:border-gray-300">Earning Call Story</Link>
+                </nav>
             </div>
 
             <div className="space-y-8">

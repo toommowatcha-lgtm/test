@@ -47,12 +47,22 @@ export interface BusinessOverview {
 }
 
 export interface FinancialMetric {
-  id?: number;
+  // id is no longer needed on the frontend. DB handles it.
   stock_id: string;
   metric_name: string;
   period_label: string; // e.g., "Q1 2024" or "2024"
   value: number | null;
 }
+
+export interface EarningCallStory {
+    id: number;
+    stock_id: string;
+    period_label: string;
+    headline: string;
+    text: string;
+    created_at?: string;
+}
+
 
 // Fix: Add StockQuote interface
 export interface StockQuote {
