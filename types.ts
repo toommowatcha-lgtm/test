@@ -1,5 +1,6 @@
 import { Session, User } from '@supabase/supabase-js';
 
+// Fix: Add AppState interface for Zustand store
 export interface AppState {
   session: Session | null;
   user: User | null;
@@ -9,48 +10,51 @@ export interface AppState {
 }
 
 export interface WatchlistItem {
-  id: number;
+  id: string; // Supabase UUID is a string
   symbol: string;
-  company_name: string;
+  company: string;
+  created_at: string;
 }
 
-export interface RevenueSegment {
+export interface RevenueBreakdownItem {
   segment: string;
-  percent: number | string;
+  percent: number | string; // Allow string for input field flexibility
 }
 
-export interface MoatPower {
-  power_name: string;
-  description: string;
-  level: 'Weak' | 'Normal' | 'High' | '';
-}
-
-export interface StockDetails {
+export interface BusinessOverview {
   id: number;
-  stock_id: number;
-  what_do?: string;
+  stock_id: string; // Foreign key to watchlist.id
+  what_do_they_do?: string;
   customers?: string;
-  revenue_segments?: RevenueSegment[];
-  moat?: MoatPower[];
+  revenue_breakdown?: RevenueBreakdownItem[];
   growth_engine?: string;
-  tam?: string;
-  market_share?: string;
-  unit_economics?: string;
   tipping_point?: string;
   updated_at?: string;
+
+  // 7 Powers
+  power_network_effect?: string;
+  power_switching_cost?: string;
+  power_branding?: string;
+  power_economics_of_scale?: string;
+  power_process_of_power?: string;
+  power_counter_position?: string;
+  power_corner_resource?: string;
+
+  // Market
+  think_tam?: string;
+  think_market_share?: string;
+  think_unit_economics?: string;
 }
 
-// Represents a single data point in the 'financials' table.
 export interface FinancialMetric {
   id?: number;
-  stock_id: number;
+  stock_id: string;
   metric_name: string;
-  quarter: string; // e.g., "Q1 2024"
+  period_label: string; // e.g., "Q1 2024" or "2024"
   value: number | null;
 }
 
-
-// FIX: Add definitions for stock-related types used throughout the application, inferred from mock data.
+// Fix: Add StockQuote interface
 export interface StockQuote {
   symbol: string;
   companyName: string;
@@ -58,13 +62,14 @@ export interface StockQuote {
   change: number;
   changePercent: number;
   marketCap: number;
-  peRatio: number;
+  peRatio: number | null;
   week52High: number;
   week52Low: number;
   exchange: string;
   sector: string;
 }
 
+// Fix: Add StockFundamentals interface
 export interface StockFundamentals {
   symbol: string;
   fiscal_year: number;
@@ -75,6 +80,7 @@ export interface StockFundamentals {
   gross_margin: number;
 }
 
+// Fix: Add Dividend interface
 export interface Dividend {
   id: number;
   symbol: string;
@@ -84,6 +90,7 @@ export interface Dividend {
   declared_date: string;
 }
 
+// Fix: Add SparklineData interface
 export interface SparklineData {
   date: string;
   value: number;

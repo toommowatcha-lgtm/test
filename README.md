@@ -33,13 +33,19 @@ A simple, clean, and fast web application for conducting and saving personal sto
     - In your Supabase project dashboard, navigate to the `SQL Editor`.
     - Create a "New query".
     - Copy the entire content of `backend/supabase/migrations/0001_initial_schema.sql` from this project.
-    - Paste the SQL into the editor and click `RUN`. This will create the `watchlist`, `stock_details`, `contacts`, and `financials` tables required for the app.
+    - Paste the SQL into the editor and click `RUN`. This will create the `watchlist`, `business_overview`, `contacts`, and `financials` tables required for the app.
 
 3.  **Set up Row Level Security (RLS) Policies:**
     - This is a critical step to allow the app to work without user logins.
     - In the `SQL Editor`, create another "New query".
     - Copy the entire content of `backend/supabase/migrations/0002_rls_policies.sql`.
     - Paste the SQL into the editor and click `RUN`. This creates policies that permit anonymous users to read and write data.
+
+4.  **Set up Automatic Financials Trigger:**
+    - This step creates a database trigger that automatically populates default financial data when you add a new stock to your watchlist.
+    - In the `SQL Editor`, create another "New query".
+    - Copy the entire content of `backend/supabase/migrations/0003_default_financials_trigger.sql`.
+    - Paste the SQL into the editor and click `RUN`.
 
 ---
 
