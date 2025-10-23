@@ -46,13 +46,52 @@ export interface BusinessOverview {
   think_unit_economics?: string;
 }
 
-export interface FinancialMetric {
-  // id is no longer needed on the frontend. DB handles it.
+export interface FlatFinancialMetric {
   stock_id: string;
   metric_name: string;
   period_label: string; // e.g., "Q1 2024" or "2024"
   value: number | null;
 }
+
+// New hierarchical types for financials - REVISED for normalized schema
+export interface FinancialPeriod {
+  id: number;
+  stock_id: string;
+  period_label: string;
+  display_order: number;
+  created_at?: string;
+}
+
+export interface FinancialValue {
+  id: number;
+  stock_id: string;
+  metric_id: number;
+  subsegment_id: number | null; // Nullable for direct metric values
+  period_id: number; // Changed from period_label
+  value: number | null;
+  created_at?: string;
+}
+
+export interface FinancialSubsegment {
+  id: number;
+  metric_id: number;
+  subsegment_name: string;
+  display_order: number;
+  financial_values: FinancialValue[]; // Populated on frontend
+  created_at?: string;
+}
+
+export interface FinancialMetric {
+  id: number;
+  stock_id: string;
+  metric_name: string;
+  display_order: number;
+  // has_subset is now a derived property on the frontend
+  financial_subsegments: FinancialSubsegment[]; // Populated on frontend
+  financial_values: FinancialValue[]; // For metrics without subsegments, populated on frontend
+  created_at?: string;
+}
+
 
 export interface EarningCallStory {
     id: number;

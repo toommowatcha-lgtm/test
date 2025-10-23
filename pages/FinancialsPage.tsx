@@ -1,8 +1,8 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { supabase } from '../services/supabaseClient';
-import { WatchlistItem, FinancialMetric } from '../types';
-import { ComposedChart, Bar, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, LabelList } from 'recharts';
+import { WatchlistItem, FinancialMetric, FinancialSubsegment, FinancialValue, FinancialPeriod } from '../types';
+import { ComposedChart, Bar, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import { debounce } from 'lodash';
 import Card from '../components/ui/Card';
 import Button from '../components/ui/Button';
@@ -10,270 +10,407 @@ import Toast, { SaveStatus } from '../components/ui/Toast';
 import { ArrowLeft, Plus, Trash2 } from 'lucide-react';
 import { formatErrorMessage } from '../utils/errorHandler';
 
-const COLORS = ['#06b6d4', '#22c55e', '#f97316', '#8b5cf6', '#ec4899', '#fde047', '#a855f7'];
-
+const COLORS = ['#06b6d4', '#22c55e', '#f97316', '#8b5cf6', '#ec4899', '#fde047', '#a855f7', '#64748b'];
 type ChartType = 'bar' | 'line';
 type ActiveTab = 'quarterly' | 'annual';
+
+
+// Chart Performance Summary Component
+const ChartSummary: React.FC<{ displayedData: Record<string, string | number>[], metrics: FinancialMetric[], selectedChartItems: Record<string, boolean> }> = ({ displayedData, metrics, selectedChartItems }) => {
+    const getYear = (p: string): number | null => {
+        const match = p.match(/\b(\d{4})\b/);
+        return match ? parseInt(match[1]) : null;
+    };
+
+    const formatPercent = (value: number | null) => {
+        if (value === null || !isFinite(value)) return 'N/A';
+        const formatted = (value * 100).toFixed(2) + '%';
+        const color = value > 0 ? 'text-success' : value < 0 ? 'text-danger' : 'text-text-secondary';
+        return <span className={color}>{value > 0 ? '+' : ''}{formatted}</span>;
+    };
+    
+    const summaryData = metrics
+      .filter(m => selectedChartItems[`metric-${m.id}`])
+      .map(metric => {
+         const values = displayedData.map(d => {
+            let total = 0;
+            if (metric.financial_subsegments.length > 0) {
+              total = metric.financial_subsegments.reduce((sum, sub) => sum + ((d[sub.subsegment_name] as number) || 0), 0);
+            } else {
+              total = (d[metric.metric_name] as number) || 0;
+            }
+            return { period: d.period_label as string, value: total };
+        }).filter(item => item.value !== 0 && isFinite(item.value));
+
+
+        if (values.length < 2) {
+            return { name: metric.metric_name, totalChange: null, cagr: null };
+        }
+
+        const first = values[0];
+        const last = values[values.length - 1];
+
+        const totalChange = (last.value - first.value) / Math.abs(first.value);
+        
+        const firstYear = getYear(first.period);
+        const lastYear = getYear(last.period);
+        let cagr: number | null = null;
+
+        if (firstYear !== null && lastYear !== null && lastYear > firstYear) {
+            const numYears = lastYear - firstYear;
+            if (first.value > 0) {
+              cagr = Math.pow(last.value / first.value, 1 / numYears) - 1;
+            }
+        }
+
+        return { name: metric.metric_name, totalChange, cagr };
+    });
+
+    if (summaryData.length === 0) return null;
+
+    return (
+        <Card className="mt-4">
+            <h3 className="text-xl font-semibold mb-2">Performance Summary</h3>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
+                {summaryData.map(data => (
+                    <div key={data.name} className="bg-accent p-3 rounded-md">
+                        <p className="font-bold text-text-primary">{data.name}</p>
+                        <div className="flex justify-between mt-1">
+                            <span className="text-text-secondary">Total Change:</span>
+                            {formatPercent(data.totalChange)}
+                        </div>
+                        <div className="flex justify-between mt-1">
+                            <span className="text-text-secondary">CAGR:</span>
+                            {formatPercent(data.cagr)}
+                        </div>
+                    </div>
+                ))}
+            </div>
+        </Card>
+    );
+};
+
 
 const FinancialsPage: React.FC = () => {
     const { stockId } = useParams<{ stockId: string }>();
     const [stock, setStock] = useState<WatchlistItem | null>(null);
-    const [financials, setFinancials] = useState<FinancialMetric[]>([]);
+    const [metrics, setMetrics] = useState<FinancialMetric[]>([]);
+    const [periods, setPeriods] = useState<FinancialPeriod[]>([]);
     const [loading, setLoading] = useState(true);
     const [saveStatus, setSaveStatus] = useState<SaveStatus>('idle');
     const [error, setError] = useState<string | null>(null);
-    const [chartMetrics, setChartMetrics] = useState<string[]>([]);
+    const [selectedChartItems, setSelectedChartItems] = useState<Record<string, boolean>>({});
     const [chartTypes, setChartTypes] = useState<Record<string, ChartType>>({});
     const [activeTab, setActiveTab] = useState<ActiveTab>('quarterly');
+    const [newlyAddedPeriodId, setNewlyAddedPeriodId] = useState<number | null>(null);
+
 
     const showSaveStatus = (status: SaveStatus, customError?: string) => {
         setSaveStatus(status);
         if (customError) setError(customError);
-        setTimeout(() => setSaveStatus('idle'), status === 'saved' ? 2000 : 4000);
+        setTimeout(() => setSaveStatus('idle'), status === 'saved' ? 2000 : 5000);
     };
 
-    const fetchFinancials = useCallback(async (showLoading = true) => {
+    const fetchData = useCallback(async (showLoading = true) => {
         if (!stockId) return;
         if (showLoading) setLoading(true);
         setError(null);
         try {
-            const { data: stockData, error: stockError } = await supabase.from('watchlist').select('*').eq('id', stockId).single();
-            if (stockError) throw stockError;
-            setStock(stockData);
+            const [stockRes, metricsRes, valuesRes, periodsRes] = await Promise.all([
+                supabase.from('watchlist').select('*').eq('id', stockId).single(),
+                supabase.from('financial_metric').select('*, financial_subsegment(*)').eq('stock_id', stockId).order('display_order'),
+                supabase.from('financial_values').select('*').eq('stock_id', stockId),
+                supabase.from('financial_period').select('*').eq('stock_id', stockId).order('display_order'),
+            ]);
+            
+            if (stockRes.error) throw stockRes.error;
+            setStock(stockRes.data);
 
-            const { data: financialsData, error: financialsError } = await supabase.from('financials').select('*').eq('stock_id', stockId);
-            if (financialsError) throw financialsError;
-            
-            const data: FinancialMetric[] = financialsData || [];
-            setFinancials(data);
-            
-            if (data.length > 0) {
-              // FIX: Using Array.from for better type inference to ensure uniqueMetrics is string[].
-              const uniqueMetrics: string[] = Array.from(new Set(data.map(f => f.metric_name))).sort();
-              if (chartMetrics.length === 0 && uniqueMetrics.length > 0) {
-                 setChartMetrics([uniqueMetrics[0]]);
-              }
-              setChartTypes(prev => {
-                const newTypes = {...prev};
-                uniqueMetrics.forEach(m => { if (!newTypes[m]) newTypes[m] = 'bar'; });
-                return newTypes;
-              });
-            }
+            if (periodsRes.error) throw periodsRes.error;
+            setPeriods(periodsRes.data || []);
+
+            const metricsData = metricsRes.data || [];
+            const valuesData = valuesRes.data || [];
+
+            // Stitch data together
+            const stitchedMetrics = metricsData.map(metric => {
+                const metricSubsegments = (metric.financial_subsegment || []).map((sub: any) => ({
+                    ...sub,
+                    financial_values: valuesData.filter(v => v.subsegment_id === sub.id)
+                }));
+                return {
+                    ...metric,
+                    financial_subsegments: metricSubsegments,
+                    financial_values: valuesData.filter(v => v.metric_id === metric.id && v.subsegment_id === null)
+                };
+            });
+            setMetrics(stitchedMetrics);
+
         } catch (err) {
             setError(formatErrorMessage('Failed to load financials', err));
         } finally {
             if (showLoading) setLoading(false);
         }
-    }, [stockId, chartMetrics.length]);
-
-    const saveData = async (records: Partial<FinancialMetric>[]) => {
-        if (records.length === 0 || !stockId) return;
-        setSaveStatus('saving');
-        try {
-            const recordsToUpsert = records.map(({ metric_name, period_label, value }) => ({ stock_id: stockId, metric_name, period_label, value }));
-            const { error: upsertError } = await supabase.from('financials').upsert(recordsToUpsert, { onConflict: 'stock_id,metric_name,period_label' });
-            if (upsertError) throw upsertError;
-            
-            showSaveStatus('saved');
-            await fetchFinancials(false);
-        } catch(err) {
-            showSaveStatus('error', formatErrorMessage('Save failed', err));
-        }
-    }
-    const debouncedSave = useCallback(debounce(saveData, 1500), [stockId, fetchFinancials]);
+    }, [stockId]);
 
     useEffect(() => {
-        fetchFinancials();
-    }, [fetchFinancials]);
+        fetchData();
+    }, [stockId, fetchData]);
+    
+    const debouncedSave = useCallback(debounce(async (table: string, data: any, conflictField?: string) => {
+        setSaveStatus('saving');
+        try {
+            const query = conflictField 
+                ? supabase.from(table).upsert(data, { onConflict: conflictField })
+                : supabase.from(table).upsert(data);
 
-    const dataProcessor = useMemo(() => {
-        const quarterlyFinancials = financials.filter(f => /^Q[1-4]\s\d{4}$/.test(f.period_label));
-        const allMetrics: string[] = Array.from(new Set(financials.map(f => f.metric_name))).sort();
-
-        const periodSorter = (a: string, b: string) => {
-            const getVal = (p: string) => {
-                const qMatch = p.match(/^Q([1-4])\s(\d{4})$/);
-                if (qMatch) return parseInt(qMatch[2]) * 4 + parseInt(qMatch[1]);
-                const yMatch = p.match(/^(\d{4})$/);
-                if (yMatch) return parseInt(yMatch[1]);
-                return 0;
-            };
-            return getVal(a) - getVal(b);
-        };
-
-        // FIX: Using Array.from for better type inference to ensure quarterlyPeriods is string[].
-        const quarterlyPeriods = Array.from(new Set(quarterlyFinancials.map(f => f.period_label))).sort(periodSorter);
-        const quarterlyDataMap: Record<string, Record<string, FinancialMetric | undefined>> = {};
-        quarterlyFinancials.forEach(f => {
-            if (!quarterlyDataMap[f.metric_name]) quarterlyDataMap[f.metric_name] = {};
-            quarterlyDataMap[f.metric_name][f.period_label] = f;
-        });
-
-        // Calculate Annual Summaries
-        const annualSummaries: FinancialMetric[] = [];
-        const groupedByYearAndMetric: { [key: string]: FinancialMetric[] } = {};
-        quarterlyFinancials.forEach(f => {
-            const year = f.period_label.split(' ')[1];
-            const key = `${f.metric_name}__${year}`;
-            if (!groupedByYearAndMetric[key]) groupedByYearAndMetric[key] = [];
-            groupedByYearAndMetric[key].push(f);
-        });
-
-        for (const key in groupedByYearAndMetric) {
-            const group = groupedByYearAndMetric[key];
-            if (group.length === 4) {
-                const totalValue = group.reduce((sum, item) => sum + (item.value || 0), 0);
-                const [metric_name, year] = key.split('__');
-                annualSummaries.push({ stock_id: stockId!, metric_name, period_label: year, value: totalValue });
-            }
+            const { error: upsertError } = await query;
+            if (upsertError) throw upsertError;
+            showSaveStatus('saved');
+        } catch (err) {
+            showSaveStatus('error', formatErrorMessage('Save failed', err));
         }
-        
-        // FIX: Using Array.from for better type inference to ensure annualPeriods is string[].
-        const annualPeriods = Array.from(new Set(annualSummaries.map(f => f.period_label))).sort();
-        const annualDataMap: Record<string, Record<string, FinancialMetric | undefined>> = {};
-        annualSummaries.forEach(f => {
-            if (!annualDataMap[f.metric_name]) annualDataMap[f.metric_name] = {};
-            annualDataMap[f.metric_name][f.period_label] = f;
-        });
-        
-        // Prepare chart data based on active tab
-        const quarterlyChartData = quarterlyPeriods.map(period => {
-            const periodData: { period_label: string; [key: string]: number | string } = { period_label: period };
-            chartMetrics.forEach(metric => {
-                periodData[metric] = quarterlyDataMap[metric]?.[period]?.value ?? 0;
-            });
-            return periodData;
-        });
-        const annualChartData = annualPeriods.map(period => {
-            const periodData: { period_label: string; [key: string]: number | string } = { period_label: period };
-            chartMetrics.forEach(metric => {
-                periodData[metric] = annualDataMap[metric]?.[period]?.value ?? 0;
-            });
-            return periodData;
-        });
-        
-        const calculateGrowth = (periods: string[], dataMap: Record<string, Record<string, FinancialMetric | undefined>>, isQuarterly: boolean) => {
-           return chartMetrics.map(metric => {
-                if (periods.length < 2) return { metric, totalChange: 'N/A', cagr: 'N/A' };
-                const startPeriod = periods[0];
-                const endPeriod = periods[periods.length - 1];
-                const startValue = dataMap[metric]?.[startPeriod]?.value;
-                const endValue = dataMap[metric]?.[endPeriod]?.value;
+    }, 1500), []);
 
-                if (typeof startValue !== 'number' || typeof endValue !== 'number' || startValue <= 0) return { metric, totalChange: 'N/A', cagr: 'N/A' };
-                
-                const totalChange = ((endValue / startValue) - 1) * 100;
-                let cagr: number | string = 'N/A';
-
-                if (isQuarterly) {
-                    const numQuarters = periods.length;
-                    if (numQuarters > 4) { // Need more than a year for CAGR
-                        const numYears = numQuarters / 4.0;
-                        cagr = (Math.pow(endValue / startValue, 1 / numYears) - 1) * 100;
-                    }
-                } else { // Annual
-                    const numYears = parseInt(endPeriod) - parseInt(startPeriod);
-                    if (numYears > 0) {
-                        cagr = (Math.pow(endValue / startValue, 1 / numYears) - 1) * 100;
-                    }
-                }
-
-                return { 
-                    metric, 
-                    totalChange: `${totalChange.toFixed(2)}%`, 
-                    cagr: typeof cagr === 'number' ? `${cagr.toFixed(2)}%` : cagr 
-                };
-            });
-        };
-        
-        const quarterlyGrowthAnalysis = calculateGrowth(quarterlyPeriods, quarterlyDataMap, true);
-        const annualGrowthAnalysis = calculateGrowth(annualPeriods, annualDataMap, false);
-
-        return { allMetrics, quarterlyPeriods, quarterlyDataMap, annualPeriods, annualDataMap, quarterlyChartData, annualChartData, quarterlyGrowthAnalysis, annualGrowthAnalysis };
-    }, [financials, chartMetrics, stockId]);
-
-    const handleValueChange = (metric_name: string, period_label: string, valueStr: string) => {
-        if (!stockId) return;
+    const handleValueChange = (metric_id: number, subsegment_id: number | null, period_id: number, valueStr: string) => {
         const value = valueStr === '' ? null : parseFloat(valueStr);
         if (isNaN(value as number) && value !== null) return;
         
-        const recordToSave: FinancialMetric = { stock_id: stockId, metric_name, period_label, value };
-        const newFinancials = [...financials];
-        const existingIndex = newFinancials.findIndex(f => f.metric_name === metric_name && f.period_label === period_label);
-        if (existingIndex > -1) newFinancials[existingIndex] = { ...newFinancials[existingIndex], ...recordToSave };
-        else newFinancials.push(recordToSave);
-        setFinancials(newFinancials);
-        debouncedSave([recordToSave]);
+        const valuePayload = { stock_id: stockId, metric_id, subsegment_id, period_id, value };
+        
+        setMetrics(prev => prev.map(m => {
+          if (m.id !== metric_id) return m;
+          const target = subsegment_id ? m.financial_subsegments.find(s => s.id === subsegment_id) : m;
+          if (!target) return m;
+
+          const valueIndex = target.financial_values.findIndex(v => v.period_id === period_id);
+          if (valueIndex > -1) {
+            target.financial_values[valueIndex].value = value;
+          } else {
+            target.financial_values.push({ id: Date.now(), ...valuePayload });
+          }
+          return { ...m };
+        }));
+
+        debouncedSave('financial_values', valuePayload, 'stock_id,metric_id,subsegment_id,period_id');
     };
     
-    const handleMetricNameChange = async (oldName: string, newName: string) => {
-        if (!stockId || !newName || oldName === newName) return;
-        if (dataProcessor.allMetrics.includes(newName)) {
-            showSaveStatus('error', 'Metric name must be unique.');
-            await fetchFinancials(false); return;
+    const handlePeriodLabelUpdate = async (id: number, newLabel: string) => {
+        let finalLabel = newLabel;
+        const isDuplicate = periods.some(p => p.id !== id && p.period_label === finalLabel);
+        if (isDuplicate) {
+            finalLabel = `${newLabel} (2)`;
         }
-        showSaveStatus('saving');
-        const { error: e } = await supabase.from('financials').update({ metric_name: newName }).match({ stock_id: stockId, metric_name: oldName });
-        if (e) showSaveStatus('error', formatErrorMessage('Failed to update metric', e));
-        else {
-            setChartMetrics(prev => prev.map(m => m === oldName ? newName : m));
-            setChartTypes(prev => { const n = {...prev}; if(n[oldName]){ n[newName] = n[oldName]; delete n[oldName]; } return n; });
+
+        setSaveStatus('saving');
+        const { error } = await supabase
+            .from('financial_period')
+            .update({ period_label: finalLabel })
+            .match({ id });
+
+        if (error) {
+            showSaveStatus('error', formatErrorMessage('Failed to update period', error));
+        } else {
             showSaveStatus('saved');
-            await fetchFinancials(false);
+            setPeriods(prev => prev.map(p => p.id === id ? { ...p, period_label: finalLabel } : p));
         }
     };
-    
+
+    const handleNameChange = (type: 'metric' | 'sub', id: number, newName: string) => {
+        const table = type === 'metric' ? 'financial_metric' : 'financial_subsegment';
+        const nameField = type === 'metric' ? 'metric_name' : 'subsegment_name';
+        debouncedSave(table, { id, [nameField]: newName });
+    }
+
     const addMetric = async () => {
         if (!stockId) return;
-        let newMetricName = "New Metric"; let count = 1;
-        while (dataProcessor.allMetrics.includes(newMetricName)) newMetricName = `New Metric ${++count}`;
-        const periodsToCreateFor = dataProcessor.quarterlyPeriods.length > 0 ? dataProcessor.quarterlyPeriods : ['Q1 2025'];
-        await saveData(periodsToCreateFor.map(p => ({ metric_name: newMetricName, period_label: p, value: 0 })));
-        setChartTypes(prev => ({...prev, [newMetricName]: 'bar'}));
+        const { data, error } = await supabase.from('financial_metric').insert({ stock_id: stockId, metric_name: 'New Metric', display_order: metrics.length }).select().single();
+        if (error) { showSaveStatus('error', formatErrorMessage('Failed to add metric', error)); return; }
+        
+        const newValues = periods.map(p => ({ stock_id: stockId, metric_id: data.id, subsegment_id: null, period_id: p.id, value: null }));
+        if (newValues.length > 0) {
+          const { error: valueError } = await supabase.from('financial_values').insert(newValues);
+          if (valueError) showSaveStatus('error', formatErrorMessage('Failed to create values', valueError));
+        }
+        await fetchData(false);
+    };
+
+    const addSubsegment = async (metric_id: number) => {
+        const parentMetric = metrics.find(m => m.id === metric_id);
+        if (!parentMetric || !stockId) return;
+        
+        if (parentMetric.financial_subsegments.length === 0) {
+            await supabase.from('financial_values').delete().match({ metric_id: metric_id, subsegment_id: null });
+        }
+        
+        const display_order = parentMetric.financial_subsegments.length;
+        const { data, error } = await supabase.from('financial_subsegment').insert({ metric_id, subsegment_name: 'New Sub-segment', display_order }).select().single();
+        if (error || !data) { showSaveStatus('error', formatErrorMessage('Failed to add sub-segment', error)); return; }
+        
+        const newValues = periods.map(p => ({ stock_id: stockId, metric_id, subsegment_id: data.id, period_id: p.id, value: null }));
+        if (newValues.length > 0) {
+          const { error: valueError } = await supabase.from('financial_values').insert(newValues);
+          if (valueError) showSaveStatus('error', formatErrorMessage('Failed to create values', valueError));
+        }
+        await fetchData(false);
     };
 
     const addPeriod = async () => {
         if (!stockId) return;
-        const lastPeriod = dataProcessor.quarterlyPeriods[dataProcessor.quarterlyPeriods.length - 1];
-        let newPeriodLabel = 'Q1 2025';
-        if (lastPeriod && lastPeriod.match(/^Q[1-4]\s\d{4}$/)) {
-            const [q, y] = lastPeriod.split(' ');
-            const quarterNum = parseInt(q.slice(1)); const yearNum = parseInt(y);
-            newPeriodLabel = quarterNum < 4 ? `Q${quarterNum + 1} ${yearNum}` : `Q1 ${yearNum + 1}`;
+
+        let nextLabel = "New Period";
+        const lastPeriod = periods.length > 0 ? periods[periods.length - 1] : null;
+
+        if (lastPeriod) {
+            const qMatch = lastPeriod.period_label.match(/^Q([1-4])\s(\d{4})$/);
+            if (qMatch) {
+                let quarter = parseInt(qMatch[1]);
+                let year = parseInt(qMatch[2]);
+                quarter = quarter === 4 ? 1 : quarter + 1;
+                year = quarter === 1 ? year + 1 : year;
+                nextLabel = `Q${quarter} ${year}`;
+            } else {
+                let counter = 1;
+                while (periods.some(p => p.period_label === nextLabel)) {
+                    nextLabel = `New Period ${counter++}`;
+                }
+            }
+        } else {
+             nextLabel = `Q1 ${new Date().getFullYear()}`;
         }
-        const metricsToCreateFor = dataProcessor.allMetrics.length > 0 ? dataProcessor.allMetrics : ["Revenue"];
-        await saveData(metricsToCreateFor.map(m => ({ metric_name: m, period_label: newPeriodLabel, value: 0 })));
+
+        setSaveStatus('saving');
+        const { data: newPeriod, error: periodError } = await supabase
+            .from('financial_period')
+            .insert({ stock_id: stockId, period_label: nextLabel, display_order: periods.length })
+            .select()
+            .single();
+        
+        if (periodError || !newPeriod) {
+            showSaveStatus('error', formatErrorMessage('Failed to add period', periodError));
+            return;
+        }
+
+        const newValuePlaceholders: Omit<FinancialValue, 'id' | 'created_at'>[] = metrics.flatMap(metric => 
+            metric.financial_subsegments.length > 0
+                ? metric.financial_subsegments.map(sub => ({ stock_id: stockId, metric_id: metric.id, subsegment_id: sub.id, period_id: newPeriod.id, value: null }))
+                : [{ stock_id: stockId, metric_id: metric.id, subsegment_id: null, period_id: newPeriod.id, value: null }]
+        );
+
+        if (newValuePlaceholders.length > 0) {
+            const { error: valuesError } = await supabase.from('financial_values').insert(newValuePlaceholders);
+            if (valuesError) {
+                showSaveStatus('error', formatErrorMessage('Failed to create values for new period', valuesError));
+            }
+        }
+        showSaveStatus('saved');
+        setNewlyAddedPeriodId(newPeriod.id);
+        await fetchData(false);
     };
     
-    const removeMetric = async (metricName: string) => {
-        if (!stockId || !confirm(`Delete metric "${metricName}"?`)) return;
-        showSaveStatus('saving');
-        const { error: e } = await supabase.from('financials').delete().match({ stock_id: stockId, metric_name: metricName });
-        if (e) showSaveStatus('error', formatErrorMessage("Failed to delete", e));
-        else {
-            setChartMetrics(prev => prev.filter(m => m !== metricName));
-            showSaveStatus('saved');
-            await fetchFinancials(false);
-        }
-    };
+    const deleteMetric = async (id: number) => {
+        if (!confirm('Delete this entire metric and all its data?')) return;
+        const { error } = await supabase.from('financial_metric').delete().match({ id });
+        if (error) showSaveStatus('error', formatErrorMessage('Failed to delete', error));
+        else fetchData(false);
+    }
 
-    const removePeriod = async (periodLabel: string) => {
-        if (!stockId || !confirm(`Delete period "${periodLabel}"?`)) return;
-        showSaveStatus('saving');
-        const { error: e } = await supabase.from('financials').delete().match({ stock_id: stockId, period_label: periodLabel });
-        if (e) showSaveStatus('error', formatErrorMessage("Failed to delete", e));
-        else {
-            showSaveStatus('saved');
-            await fetchFinancials(false);
-        }
+    const deleteSubsegment = async (id: number) => {
+        if (!confirm('Delete this sub-segment?')) return;
+        const { error } = await supabase.from('financial_subsegment').delete().match({ id });
+        if (error) showSaveStatus('error', formatErrorMessage('Failed to delete', error));
+        else fetchData(false);
+    }
+    
+    const calculateMetricTotalForPeriod = (metric: FinancialMetric, periodId: number) => {
+        return metric.financial_subsegments.reduce((total, sub) => {
+            const value = sub.financial_values.find(v => v.period_id === periodId)?.value || 0;
+            return total + value;
+        }, 0);
     };
+    
+    const { chartData, annualData } = useMemo(() => {
+        const quarterlyChartData = periods.map(period => {
+            const entry: Record<string, string | number> = { period_label: period.period_label };
+            metrics.forEach(m => {
+                if (m.financial_subsegments.length > 0) {
+                    m.financial_subsegments.forEach(s => {
+                        entry[s.subsegment_name] = s.financial_values.find(v => v.period_id === period.id)?.value ?? 0;
+                    });
+                } else {
+                    entry[m.metric_name] = m.financial_values.find(v => v.period_id === period.id)?.value ?? 0;
+                }
+            });
+            return entry;
+        });
+
+        const groupedByYear: Record<string, Record<string, number | string>> = {};
+        quarterlyChartData.forEach(item => {
+            const yearMatch = (item.period_label as string).match(/\d{4}$/);
+            if (yearMatch) {
+                const year = yearMatch[0];
+                if (!groupedByYear[year]) groupedByYear[year] = { period_label: year };
+                Object.keys(item).forEach(key => {
+                    if (key !== 'period_label') {
+                        if (!groupedByYear[year][key]) groupedByYear[year][key] = 0;
+                        groupedByYear[year][key] = (groupedByYear[year][key] as number) + (item[key] as number);
+                    }
+                });
+            }
+        });
+        const annualChartData = Object.values(groupedByYear).sort((a,b) => (a.period_label as string).localeCompare((b.period_label as string)));
+
+        return { chartData: quarterlyChartData, annualData: annualChartData };
+    }, [metrics, periods]);
+    
+    const displayedData = activeTab === 'quarterly' ? chartData : annualData;
 
     if (loading) return <div className="p-8 text-center text-text-secondary">Loading Financials...</div>;
     if (error && !stock) return <div className="p-8 text-center text-danger bg-danger/10 rounded-lg">{error}</div>;
 
-    const valueFormatter = (v: any) => typeof v === 'number' ? new Intl.NumberFormat('en-US',{notation:'compact',compactDisplay:'short'}).format(v) : '';
-    const chartData = activeTab === 'quarterly' ? dataProcessor.quarterlyChartData : dataProcessor.annualChartData;
-    const growthAnalysis = activeTab === 'quarterly' ? dataProcessor.quarterlyGrowthAnalysis : dataProcessor.annualGrowthAnalysis;
+    const valueFormatter = (v: string | number): string => (typeof v === 'number') ? new Intl.NumberFormat('en-US', { notation: 'compact', compactDisplay: 'short' }).format(v) : String(v);
+    
+    const EditablePeriodHeader: React.FC<{ period: FinancialPeriod; onUpdate: (id: number, newLabel: string) => void; startInEditMode: boolean; onEditEnd: () => void; }> = ({ period, onUpdate, startInEditMode, onEditEnd }) => {
+        const [isEditing, setIsEditing] = useState(startInEditMode);
+        const [label, setLabel] = useState(period.period_label);
+        const inputRef = useRef<HTMLInputElement>(null);
+
+        useEffect(() => {
+            if (startInEditMode) setIsEditing(true);
+        }, [startInEditMode]);
+
+        useEffect(() => {
+            if (isEditing && inputRef.current) {
+                inputRef.current.focus();
+                inputRef.current.select();
+            }
+        }, [isEditing]);
+
+        const handleBlur = () => {
+            setIsEditing(false);
+            onEditEnd();
+            if (label.trim() && label !== period.period_label) {
+                onUpdate(period.id, label.trim());
+            } else {
+                setLabel(period.period_label);
+            }
+        };
+
+        const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+            if (e.key === 'Enter') inputRef.current?.blur();
+            else if (e.key === 'Escape') {
+                setLabel(period.period_label);
+                setIsEditing(false);
+                onEditEnd();
+            }
+        };
+
+        if (isEditing) {
+            return <input ref={inputRef} type="text" value={label} onChange={e => setLabel(e.target.value)} onBlur={handleBlur} onKeyDown={handleKeyDown} className="w-full bg-accent p-1 text-center rounded focus:outline-none focus:ring-2 focus:ring-primary" />;
+        }
+        return <div onClick={() => setIsEditing(true)} className="p-1 rounded cursor-pointer hover:bg-accent min-h-[34px] flex items-center justify-center">{period.period_label}</div>;
+    };
+
 
     return (
         <div className="container mx-auto p-4 md:p-8">
@@ -281,44 +418,83 @@ const FinancialsPage: React.FC = () => {
             <header className="mb-8"><h1 className="text-5xl font-bold">{stock?.symbol} - Financials</h1><p className="text-xl text-text-secondary">{stock?.company}</p></header>
             
             <Card className="mb-8">
-                <h2 className="text-2xl font-semibold mb-4">Chart Controls</h2>
-                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4 mb-4">
-                  {dataProcessor.allMetrics.map(metric => (
-                    <div key={metric}>
-                      <label className="flex items-center space-x-2 cursor-pointer mb-1"><input type="checkbox" checked={chartMetrics.includes(metric)} onChange={() => setChartMetrics(prev => prev.includes(metric) ? prev.filter(m => m !== metric) : [...prev, metric])} className="form-checkbox h-5 w-5 rounded bg-accent border-gray-600 text-primary focus:ring-primary"/><span>{metric}</span></label>
-                      <div className="flex items-center rounded-md bg-accent p-0.5 w-min ml-7"><button onClick={() => setChartTypes(p => ({...p, [metric]: 'bar'}))} className={`px-2 py-0.5 text-xs rounded-sm transition-colors ${chartTypes[metric] === 'bar' ? 'bg-primary text-white' : 'hover:bg-content'}`}>Bar</button><button onClick={() => setChartTypes(p => ({...p, [metric]: 'line'}))} className={`px-2 py-0.5 text-xs rounded-sm transition-colors ${chartTypes[metric] === 'line' ? 'bg-primary text-white' : 'hover:bg-content'}`}>Line</button></div>
+                <h2 className="text-2xl font-semibold mb-4">Chart Controls & Visualization</h2>
+                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-x-4 gap-y-2 mb-4">
+                  {metrics.map(metric => (
+                    <div key={metric.id}>
+                      <label className="flex items-center space-x-2 cursor-pointer font-bold">
+                        <input type="checkbox" checked={!!selectedChartItems[`metric-${metric.id}`]} onChange={() => setSelectedChartItems(p => ({...p, [`metric-${metric.id}`]: !p[`metric-${metric.id}`]}))} className="form-checkbox h-5 w-5 rounded bg-accent border-gray-600 text-primary focus:ring-primary"/>
+                        <span>{metric.metric_name}</span>
+                      </label>
                     </div>
                   ))}
                 </div>
                 <div style={{ width: '100%', height: 400 }}>
-                    <ResponsiveContainer><ComposedChart data={chartData} margin={{ top: 30, right: 30, left: 20, bottom: 5 }}><CartesianGrid strokeDasharray="3 3" stroke="#374151" /><XAxis dataKey="period_label" stroke="#d1d5db" /><YAxis yAxisId="left" stroke="#d1d5db" tickFormatter={valueFormatter} /><YAxis yAxisId="right" orientation="right" stroke="#d1d5db" tickFormatter={(v: any) => (typeof v === 'number' && Number.isFinite(v) ? `${v.toFixed(0)}%` : '')} /><Tooltip contentStyle={{ backgroundColor: '#1f2937', border: '1px solid #374151' }} formatter={(value: any, name: any) => { const sName = String(name); if (typeof value !== 'number' || !Number.isFinite(value)) return [String(value), sName]; return [sName.includes('%') ? `${value.toFixed(2)}%` : valueFormatter(value), sName];}} /><Legend />{chartMetrics.map((metric, i) => { const yAxis = metric.toLowerCase().includes('margin') || metric.toLowerCase().includes('%') ? 'right' : 'left'; if (chartTypes[metric] === 'line') return <Line key={metric} yAxisId={yAxis} type="monotone" dataKey={metric} stroke={COLORS[i % COLORS.length]} strokeWidth={2} dot={{ r: 4 }}><LabelList dataKey={metric} position="top" formatter={valueFormatter} style={{ fill: '#d1d5db' }}/></Line>; return <Bar key={metric} yAxisId={yAxis} dataKey={metric} fill={COLORS[i % COLORS.length]}><LabelList dataKey={metric} position="top" formatter={valueFormatter} style={{ fill: '#d1d5db' }}/></Bar>})}</ComposedChart></ResponsiveContainer>
+                    <ResponsiveContainer>
+                        <ComposedChart data={displayedData} margin={{ top: 5, right: 20, left: 0, bottom: 5 }}>
+                            <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+                            <XAxis dataKey="period_label" stroke="#d1d5db" />
+                            <YAxis stroke="#d1d5db" tickFormatter={valueFormatter} />
+                            <Tooltip contentStyle={{ backgroundColor: '#1f2937', border: '1px solid #374151' }} formatter={valueFormatter} />
+                            <Legend />
+                            {metrics.filter(m => selectedChartItems[`metric-${m.id}`]).map((metric, i) => {
+                                if (metric.financial_subsegments.length > 0) {
+                                    return metric.financial_subsegments.map((sub, j) => (
+                                        <Bar key={sub.id} dataKey={sub.subsegment_name} stackId={metric.id} fill={COLORS[(i*3 + j) % COLORS.length]} />
+                                    ));
+                                } else {
+                                    return <Bar key={metric.id} dataKey={metric.metric_name} fill={COLORS[i % COLORS.length]} />;
+                                }
+                            })}
+                        </ComposedChart>
+                    </ResponsiveContainer>
                 </div>
-                {growthAnalysis.length > 0 && (
-                    <div className="mt-6"><h3 className="text-xl font-semibold mb-2">Growth Analysis ({activeTab === 'quarterly' ? 'Quarterly' : 'Annual'})</h3><div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-center">{growthAnalysis.map(ga => (<div key={ga.metric} className="bg-accent p-3 rounded-lg"><p className="font-bold">{ga.metric}</p><p className="text-sm text-text-secondary">Total Change: <span className="text-text-primary font-mono">{ga.totalChange}</span></p><p className="text-sm text-text-secondary">CAGR: <span className="text-text-primary font-mono">{ga.cagr}</span></p></div>))}</div></div>
-                )}
+                <ChartSummary displayedData={displayedData} metrics={metrics} selectedChartItems={selectedChartItems} />
             </Card>
 
             <Card>
-                <div className="border-b border-accent mb-4">
-                    <nav className="-mb-px flex space-x-8" aria-label="Tabs">
-                        {(['quarterly', 'annual'] as ActiveTab[]).map((tab) => (
-                            <button key={tab} onClick={() => setActiveTab(tab)} className={`${activeTab === tab ? 'border-primary text-primary' : 'border-transparent text-text-secondary hover:text-text-primary hover:border-gray-300'} capitalize whitespace-nowrap py-3 px-1 border-b-2 font-medium text-sm`}>{tab}</button>
-                        ))}
-                    </nav>
+                <div className="border-b border-accent mb-4"><nav className="-mb-px flex space-x-8"><button onClick={() => setActiveTab('quarterly')} className={`${activeTab === 'quarterly' ? 'border-primary text-primary' : 'border-transparent text-text-secondary hover:text-text-primary'} capitalize whitespace-nowrap py-3 px-1 border-b-2 font-medium text-sm`}>Quarterly</button><button onClick={() => setActiveTab('annual')} className={`${activeTab === 'annual' ? 'border-primary text-primary' : 'border-transparent text-text-secondary hover:text-text-primary'} capitalize whitespace-nowrap py-3 px-1 border-b-2 font-medium text-sm`}>Annual</button></nav></div>
+                <div className="overflow-x-auto">
+                    <table className="w-full min-w-[800px] text-left">
+                        <thead><tr><th className="p-3 font-semibold sticky left-0 bg-content z-20 w-52">Metric / Sub-segment</th>{periods.map(p => (<th key={p.id} className="p-1 font-semibold text-center"><EditablePeriodHeader period={p} onUpdate={handlePeriodLabelUpdate} startInEditMode={p.id === newlyAddedPeriodId} onEditEnd={() => setNewlyAddedPeriodId(null)} /></th>))}</tr></thead>
+                        <tbody>
+                            {metrics.map(metric => (
+                                <React.Fragment key={metric.id}>
+                                    <tr className="bg-content hover:bg-content/50 group">
+                                        <td className="p-2 font-bold sticky left-0 bg-content z-10 w-52 flex items-center gap-1">
+                                            <Button variant="danger" size="sm" className="p-1 h-6 w-6 opacity-0 group-hover:opacity-100" onClick={() => deleteMetric(metric.id)}><Trash2 className="w-3 h-3"/></Button>
+                                            <input type="text" defaultValue={metric.metric_name} onBlur={(e) => handleNameChange('metric', metric.id, e.target.value)} className="w-full bg-transparent p-1 rounded hover:bg-accent focus:bg-accent" />
+                                        </td>
+                                        {periods.map(p => <td key={p.id} className="p-1">
+                                            <input type="number" step="any"
+                                                className="w-full bg-transparent p-2 text-right rounded hover:bg-accent focus:bg-accent disabled:text-text-secondary disabled:font-bold disabled:hover:bg-transparent"
+                                                disabled={metric.financial_subsegments.length > 0}
+                                                defaultValue={metric.financial_subsegments.length > 0 ? calculateMetricTotalForPeriod(metric, p.id) : metric.financial_values.find(v => v.period_id === p.id)?.value ?? ''}
+                                                onBlur={(e) => { if (metric.financial_subsegments.length === 0) handleValueChange(metric.id, null, p.id, e.target.value); }}
+                                            />
+                                        </td>)}
+                                    </tr>
+                                    {metric.financial_subsegments.map(sub => (
+                                        <tr key={sub.id} className="hover:bg-accent/20 group">
+                                            <td className="p-2 pl-6 sticky left-0 bg-content z-10 w-52 flex items-center gap-1">
+                                                <Button variant="danger" size="sm" className="p-1 h-6 w-6 opacity-0 group-hover:opacity-100" onClick={() => deleteSubsegment(sub.id)}><Trash2 className="w-3 h-3"/></Button>
+                                                <input type="text" defaultValue={sub.subsegment_name} onBlur={(e) => handleNameChange('sub', sub.id, e.target.value)} className="w-full bg-transparent p-1 rounded hover:bg-accent focus:bg-accent"/>
+                                            </td>
+                                            {periods.map(p => (
+                                                <td key={p.id} className="p-1"><input type="number" step="any" defaultValue={sub.financial_values.find(v => v.period_id === p.id)?.value ?? ''} onBlur={(e) => handleValueChange(metric.id, sub.id, p.id, e.target.value)} placeholder="-" className="w-full bg-transparent p-2 text-right rounded hover:bg-accent focus:bg-accent"/></td>
+                                            ))}
+                                        </tr>
+                                    ))}
+                                    <tr><td colSpan={periods.length + 1} className="py-1 pl-6"><Button onClick={() => addSubsegment(metric.id)} variant="secondary" size="sm" className="text-xs px-2 py-1"><Plus className="w-3 h-3 mr-1"/>Add Sub-segment</Button></td></tr>
+                                </React.Fragment>
+                            ))}
+                        </tbody>
+                    </table>
                 </div>
-                {activeTab === 'quarterly' && (
-                    <>
-                        <div className="flex justify-between items-center mb-4"><h2 className="text-2xl font-semibold">Quarterly Data</h2><Button onClick={addPeriod} variant="secondary"><Plus className="w-4 h-4 mr-2"/>Add Period</Button></div>
-                        <div className="overflow-x-auto"><table className="w-full min-w-[800px] text-left"><thead><tr><th className="p-3 font-semibold sticky left-0 bg-content z-20 w-48">Metric</th>{dataProcessor.quarterlyPeriods.map(p => (<th key={p} className="p-1 font-semibold text-center group"><div className="flex items-center gap-1 justify-center"><span>{p}</span><Button variant="danger" size="sm" className="p-1 h-6 w-6 opacity-0 group-hover:opacity-100" onClick={() => removePeriod(p)}><Trash2 className="w-3 h-3"/></Button></div></th>))}</tr></thead><tbody>{dataProcessor.allMetrics.map(metric => (<tr key={metric} className="hover:bg-accent/20 group"><td className="p-1 font-bold sticky left-0 bg-content z-10 w-48 flex items-center gap-2"><Button variant="danger" size="sm" className="p-1 h-6 w-6 opacity-0 group-hover:opacity-100" onClick={() => removeMetric(metric)}><Trash2 className="w-3 h-3"/></Button><input type="text" defaultValue={metric} onBlur={(e) => handleMetricNameChange(metric, e.target.value)} className="w-full bg-transparent p-2 rounded hover:bg-accent focus:bg-accent focus:outline-none"/></td>{dataProcessor.quarterlyPeriods.map(p => (<td key={p} className="p-1"><input type="number" step="any" defaultValue={dataProcessor.quarterlyDataMap[metric]?.[p]?.value ?? ''} onBlur={(e) => handleValueChange(metric, p, e.target.value)} placeholder="-" className="w-full bg-transparent p-2 text-right rounded hover:bg-accent focus:bg-accent focus:outline-none"/></td>))}</tr>))}</tbody></table></div>
-                        <Button onClick={addMetric} variant="secondary" className="mt-4"><Plus className="w-4 h-4 mr-2"/>Add Metric</Button>
-                    </>
-                )}
-                {activeTab === 'annual' && (
-                    <>
-                        <h2 className="text-2xl font-semibold mb-4">Annual Summary (Read-only)</h2>
-                        <div className="overflow-x-auto"><table className="w-full min-w-[600px] text-left"><thead><tr><th className="p-3 font-semibold sticky left-0 bg-content z-20 w-48">Metric</th>{dataProcessor.annualPeriods.map(p => <th key={p} className="p-3 font-semibold text-center">{p}</th>)}</tr></thead><tbody>{dataProcessor.allMetrics.map(metric => (<tr key={metric} className="hover:bg-accent/20"><td className="p-3 font-bold sticky left-0 bg-content z-10 w-48">{metric}</td>{dataProcessor.annualPeriods.map(p => (<td key={p} className="p-3 text-right">{dataProcessor.annualDataMap[metric]?.[p]?.value?.toLocaleString() ?? '-'}</td>))}</tr>))}</tbody></table></div>
-                    </>
-                )}
+                <div className="flex gap-4 mt-4">
+                  <Button onClick={addMetric} variant="secondary"><Plus className="w-4 h-4 mr-2"/>Add Metric</Button>
+                  {activeTab === 'quarterly' && <Button onClick={addPeriod} variant="secondary"><Plus className="w-4 h-4 mr-2"/>Add Period</Button>}
+                </div>
             </Card>
             <Toast status={saveStatus} message={error ?? undefined}/>
         </div>
