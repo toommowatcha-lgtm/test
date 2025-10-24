@@ -53,28 +53,29 @@ export interface FlatFinancialMetric {
   value: number | null;
 }
 
-// New hierarchical types for financials - REVISED for normalized schema
+// New hierarchical types for financials - REVISED for normalized schema with UUIDs
 export interface FinancialPeriod {
-  id: number;
-  stock_id: string;
+  id: string; // UUID
+  stock_id: string; // UUID
   period_label: string;
+  period_type: string; // 'quarter' or 'annual'
   display_order: number;
   created_at?: string;
 }
 
 export interface FinancialValue {
-  id: number;
-  stock_id: string;
-  metric_id: number;
-  subsegment_id: number | null; // Nullable for direct metric values
-  period_id: number; // Changed from period_label
+  id: string; // UUID
+  stock_id: string; // UUID
+  metric_id: string; // UUID
+  subsegment_id: string | null; // UUID
+  period_id: string; // UUID
   value: number | null;
   created_at?: string;
 }
 
 export interface FinancialSubsegment {
-  id: number;
-  metric_id: number;
+  id: string; // UUID
+  metric_id: string; // UUID
   subsegment_name: string;
   display_order: number;
   financial_values: FinancialValue[]; // Populated on frontend
@@ -82,11 +83,10 @@ export interface FinancialSubsegment {
 }
 
 export interface FinancialMetric {
-  id: number;
-  stock_id: string;
+  id: string; // UUID
+  stock_id: string; // UUID
   metric_name: string;
   display_order: number;
-  // has_subset is now a derived property on the frontend
   financial_subsegments: FinancialSubsegment[]; // Populated on frontend
   financial_values: FinancialValue[]; // For metrics without subsegments, populated on frontend
   created_at?: string;

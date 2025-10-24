@@ -62,7 +62,7 @@ const CalculatedField = ({ label, value, unit, highlight = false }: {
 );
 
 const ValuationPage: React.FC = () => {
-    const { stockId } = useParams<{ stockId: string }>();
+    const { stockId = '' } = useParams<{ stockId: string }>();
     const [stock, setStock] = useState<WatchlistItem | null>(null);
     const [inputs, setInputs] = useState<Omit<Valuation, 'id' | 'stock_id' | 'created_at' | 'updated_at'>>(defaultValuation);
     const [loading, setLoading] = useState(true);
@@ -175,7 +175,15 @@ const ValuationPage: React.FC = () => {
 
     return (
         <div className="container mx-auto p-4 md:p-8">
-            <Link to={`/stock/${stockId}`} className="inline-flex items-center text-primary mb-6 hover:underline"><ArrowLeft className="w-4 h-4 mr-2" />Back to Overview</Link>
+            <Link to="/" className="inline-flex items-center text-primary mb-6 hover:underline"><ArrowLeft className="w-4 h-4 mr-2" />Back to Watchlist</Link>
+             <div className="border-b border-accent mb-8">
+                <nav className="-mb-px flex space-x-8" aria-label="Tabs">
+                    <Link to={`/stock/${stockId}`} className="whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm border-transparent text-text-secondary hover:text-text-primary hover:border-gray-300">Business Overview</Link>
+                    <Link to={`/stock/${stockId}/financials`} className="whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm border-transparent text-text-secondary hover:text-text-primary hover:border-gray-300">Financials</Link>
+                    <Link to={`/stock/${stockId}/earning-call-story`} className="whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm border-transparent text-text-secondary hover:text-text-primary hover:border-gray-300">Earning Call Story</Link>
+                    <Link to={`/stock/${stockId}/valuation`} className="whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm border-primary text-primary">Valuation</Link>
+                </nav>
+            </div>
             <header className="mb-8">
                 <h1 className="text-5xl font-bold">{stock?.symbol} - Valuation</h1>
                 <p className="text-xl text-text-secondary">{stock?.company}</p>

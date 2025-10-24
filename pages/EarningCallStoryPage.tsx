@@ -1,7 +1,7 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { supabase } from '../services/supabaseClient';
-import { WatchlistItem, EarningCallStory, FinancialMetric } from '../types';
+import { WatchlistItem, EarningCallStory } from '../types';
 import { debounce } from 'lodash';
 import Card from '../components/ui/Card';
 import Button from '../components/ui/Button';
@@ -10,7 +10,7 @@ import { ArrowLeft, Plus, Trash2 } from 'lucide-react';
 import { formatErrorMessage } from '../utils/errorHandler';
 
 const EarningCallStoryPage: React.FC = () => {
-    const { stockId } = useParams<{ stockId: string }>();
+    const { stockId = '' } = useParams<{ stockId: string }>();
     const [stock, setStock] = useState<WatchlistItem | null>(null);
     const [stories, setStories] = useState<EarningCallStory[]>([]);
     const [financialPeriods, setFinancialPeriods] = useState<string[]>([]);
@@ -36,42 +36,34 @@ const EarningCallStoryPage: React.FC = () => {
         }
     }, 1500), [stockId]);
 
-    useEffect(() => {
-        const fetchData = async () => {
-            if (!stockId) return;
-            setLoading(true);
-            setError(null);
-            try {
-                const { data: stockData, error: stockError } = await supabase.from('watchlist').select('*').eq('id', stockId).single();
-                if (stockError) throw stockError;
-                setStock(stockData);
+    const fetchData = useCallback(async () => {
+        if (!stockId) return;
+        setLoading(true);
+        setError(null);
+        try {
+            const { data: stockData, error: stockError } = await supabase.from('watchlist').select('*').eq('id', stockId).single();
+            if (stockError) throw stockError;
+            setStock(stockData);
 
-                const { data: storiesData, error: storiesError } = await supabase.from('earning_call_story').select('*').eq('stock_id', stockId).order('created_at', { ascending: false });
-                if (storiesError) throw storiesError;
-                setStories(storiesData || []);
+            const { data: storiesData, error: storiesError } = await supabase.from('earning_call_story').select('*').eq('stock_id', stockId).order('created_at', { ascending: false });
+            if (storiesError) throw storiesError;
+            setStories(storiesData || []);
 
-                const { data: financialsData, error: financialsError } = await supabase.from('financials').select('period_label').eq('stock_id', stockId);
-                if (financialsError) throw financialsError;
-                
-                const uniquePeriods = [...new Set((financialsData || []).map((f: {period_label: string}) => f.period_label))];
-                const periodSorter = (a: string, b: string) => {
-                  const getVal = (p: string) => {
-                      const qMatch = p.match(/^Q([1-4])\s(\d{4})$/);
-                      if (qMatch) return parseInt(qMatch[2]) * 4 + parseInt(qMatch[1]);
-                      return 0;
-                  };
-                  return getVal(b) - getVal(a); // Sort descending
-                };
-                setFinancialPeriods(uniquePeriods.sort(periodSorter));
+            const { data: periodsData, error: periodsError } = await supabase.from('financial_period').select('period_label, display_order').eq('stock_id', stockId).order('display_order', { ascending: false });
+            if (periodsError) throw periodsError;
+            
+            setFinancialPeriods((periodsData || []).map(p => p.period_label));
 
-            } catch (err) {
-                setError(formatErrorMessage('Could not load data', err));
-            } finally {
-                setLoading(false);
-            }
-        };
-        fetchData();
+        } catch (err) {
+            setError(formatErrorMessage('Could not load data', err));
+        } finally {
+            setLoading(false);
+        }
     }, [stockId]);
+
+    useEffect(() => {
+        fetchData();
+    }, [stockId, fetchData]);
 
     const handleStoryChange = (id: number, field: keyof EarningCallStory, value: string) => {
         const newStories = stories.map(s => {
@@ -136,7 +128,17 @@ const EarningCallStoryPage: React.FC = () => {
 
     return (
         <div className="container mx-auto p-4 md:p-8">
-            <Link to={`/stock/${stockId}`} className="inline-flex items-center text-primary mb-6 hover:underline"><ArrowLeft className="w-4 h-4 mr-2" />Back to Overview</Link>
+            <Link to="/" className="inline-flex items-center text-primary mb-6 hover:underline"><ArrowLeft className="w-4 h-4 mr-2" />Back to Watchlist</Link>
+            
+            <div className="border-b border-accent mb-8">
+                <nav className="-mb-px flex space-x-8" aria-label="Tabs">
+                    <Link to={`/stock/${stockId}`} className="whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm border-transparent text-text-secondary hover:text-text-primary hover:border-gray-300">Business Overview</Link>
+                    <Link to={`/stock/${stockId}/financials`} className="whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm border-transparent text-text-secondary hover:text-text-primary hover:border-gray-300">Financials</Link>
+                    <Link to={`/stock/${stockId}/earning-call-story`} className="whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm border-primary text-primary">Earning Call Story</Link>
+                    <Link to={`/stock/${stockId}/valuation`} className="whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm border-transparent text-text-secondary hover:text-text-primary hover:border-gray-300">Valuation</Link>
+                </nav>
+            </div>
+
             <header className="flex justify-between items-center mb-8">
                 <div>
                     <h1 className="text-5xl font-bold">{stock?.symbol} - Earning Call Story</h1>
@@ -166,6 +168,7 @@ const EarningCallStoryPage: React.FC = () => {
                                         className="bg-accent p-2 rounded border border-gray-600 focus:ring-primary focus:border-primary text-sm"
                                     >
                                         {financialPeriods.map(p => <option key={p} value={p}>{p}</option>)}
+                                        {!financialPeriods.includes(story.period_label) && <option key={story.period_label} value={story.period_label}>{story.period_label}</option> }
                                     </select>
                                     <Button variant="danger" onClick={() => deleteNote(story.id)} className="p-2 h-10 w-10">
                                         <Trash2 className="w-4 h-4" />

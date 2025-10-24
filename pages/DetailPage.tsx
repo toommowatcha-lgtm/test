@@ -76,11 +76,23 @@ const DetailPage: React.FC = () => {
             setError(null);
             try {
                 const { data: stockData, error: stockError } = await supabase.from('watchlist').select('*').eq('id', stockId).single();
-                if (stockError) throw stockError;
+                
+                if (stockError && stockError.code !== 'PGRST116') {
+                    // A real error occurred (not just 'not found')
+                    throw stockError;
+                }
+
+                // If we're here, either data is found, or it's a 'not found' (PGRST116) error.
+                // If stockData is null, it means the stock was not found.
+                if (!stockData) {
+                    setStock(null);
+                    return; // Let render logic handle the "not found" message
+                }
+                
                 setStock(stockData);
 
                 const { data: overviewData, error: overviewError } = await supabase.from('business_overview').select('*').eq('stock_id', stockId).single();
-                if (overviewError && overviewError.code !== 'PGRST116') throw overviewError; // Ignore "exact one row" error
+                if (overviewError && overviewError.code !== 'PGRST116') throw overviewError; 
                 
                 setOverview(overviewData || createDefaultOverview(stockId) as BusinessOverview);
             } catch (err) {
@@ -129,17 +141,18 @@ const DetailPage: React.FC = () => {
     return (
         <div className="container mx-auto p-4 md:p-8">
             <Link to="/" className="inline-flex items-center text-primary mb-6 hover:underline"><ArrowLeft className="w-4 h-4 mr-2" />Back to Watchlist</Link>
-            <header className="mb-8"><h1 className="text-5xl font-bold">{stock.symbol}</h1><p className="text-xl text-text-secondary">{stock.company}</p></header>
             
             <div className="border-b border-accent mb-8">
-                <nav className="-mb-px flex space-x-8">
-                    <span className="whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm border-primary text-primary">Business Overview</span>
+                <nav className="-mb-px flex space-x-8" aria-label="Tabs">
+                    <Link to={`/stock/${stockId}`} className="whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm border-primary text-primary">Business Overview</Link>
                     <Link to={`/stock/${stockId}/financials`} className="whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm border-transparent text-text-secondary hover:text-text-primary hover:border-gray-300">Financials</Link>
                     <Link to={`/stock/${stockId}/earning-call-story`} className="whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm border-transparent text-text-secondary hover:text-text-primary hover:border-gray-300">Earning Call Story</Link>
                     <Link to={`/stock/${stockId}/valuation`} className="whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm border-transparent text-text-secondary hover:text-text-primary hover:border-gray-300">Valuation</Link>
                 </nav>
             </div>
 
+            <header className="mb-8"><h1 className="text-5xl font-bold">{stock.symbol}</h1><p className="text-xl text-text-secondary">{stock.company}</p></header>
+            
             <div className="space-y-8">
                 <Card><h2 className="text-2xl font-semibold mb-4 border-b border-accent pb-2">Business Description</h2><div className="space-y-4"><EditableTextarea label="What does this company do?" value={overview.what_do_they_do || ''} onChange={(e) => updateField('what_do_they_do', e.target.value)} placeholder="Describe the core business..." rows={4} /><EditableTextarea label="Who are their customers?" value={overview.customers || ''} onChange={(e) => updateField('customers', e.target.value)} placeholder="Describe the target customer base..." rows={3} /></div></Card>
                 <Card><h2 className="text-2xl font-semibold mb-4 border-b border-accent pb-2">Revenue Breakdown</h2><div className="grid grid-cols-1 md:grid-cols-2 gap-8"><div className="space-y-2">{(overview.revenue_breakdown || []).map((seg, index) => (<div key={index} className="flex items-center gap-2"><input type="text" placeholder="Segment Name" value={seg.segment} onChange={(e) => handleRevenueChange(index, 'segment', e.target.value)} className="w-full bg-accent p-2 rounded border border-gray-600 focus:ring-primary focus:border-primary"/><input type="number" placeholder="%" value={seg.percent} onChange={(e) => handleRevenueChange(index, 'percent', e.target.value)} className="w-24 bg-accent p-2 rounded border border-gray-600 focus:ring-primary focus:border-primary"/><Button variant="danger" onClick={() => removeRevenueSegment(index)} className="p-2"><Trash2 className="w-4 h-4"/></Button></div>))}<Button onClick={addRevenueSegment} variant="secondary"><Plus className="w-4 h-4 mr-2"/>Add Segment</Button></div><div style={{ width: '100%', height: 250 }}>{chartData.length > 0 ? (<ResponsiveContainer><PieChart><Pie data={chartData} dataKey="percent" nameKey="segment" cx="50%" cy="50%" outerRadius={80} fill="#8884d8" label={({ name, percent }) => `${name} ${percent}%`}>{chartData.map((entry, index) => <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />)}</Pie><Tooltip formatter={(value) => `${value}%`}/></PieChart></ResponsiveContainer>) : (<div className="flex items-center justify-center h-full text-text-secondary">Add revenue data to see chart</div>)}</div></div></Card>
