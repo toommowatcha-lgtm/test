@@ -21,6 +21,13 @@ export interface RevenueBreakdownItem {
   percent: number | string; // Allow string for input field flexibility
 }
 
+export interface MoatPower {
+  company_id: string;
+  power_name: string;
+  power_level: 'Weak' | 'Normal' | 'High' | null;
+  power_note: string | null;
+}
+
 export interface BusinessOverview {
   id: number;
   stock_id: string; // Foreign key to watchlist.id
@@ -30,15 +37,6 @@ export interface BusinessOverview {
   growth_engine?: string;
   tipping_point?: string;
   updated_at?: string;
-
-  // 7 Powers
-  power_network_effect?: string;
-  power_switching_cost?: string;
-  power_branding?: string;
-  power_economics_of_scale?: string;
-  power_process_of_power?: string;
-  power_counter_position?: string;
-  power_corner_resource?: string;
 
   // Market
   think_tam?: string;

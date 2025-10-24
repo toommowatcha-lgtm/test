@@ -1,10 +1,10 @@
-
 import React, { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
 import Card from '../components/ui/Card';
 import stockService from '../services/stockService';
 import { StockQuote, StockFundamentals, Dividend } from '../types';
 import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
+import { formatErrorMessage } from '../utils/errorHandler';
 
 type Tab = 'Overview' | 'Fundamentals' | 'Dividends' | 'News';
 
@@ -15,11 +15,13 @@ const StockDetailPage: React.FC = () => {
   const [fundamentals, setFundamentals] = useState<StockFundamentals[]>([]);
   const [dividends, setDividends] = useState<Dividend[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     const fetchData = async () => {
       if (!symbol) return;
       setLoading(true);
+      setError(null);
       try {
         const [quoteData, fundamentalsData, dividendsData] = await Promise.all([
           stockService.getQuote(symbol),
@@ -29,8 +31,8 @@ const StockDetailPage: React.FC = () => {
         setQuote(quoteData);
         setFundamentals(fundamentalsData);
         setDividends(dividendsData);
-      } catch (error) {
-        console.error("Failed to fetch stock data", error);
+      } catch (err) {
+        setError(formatErrorMessage('Could not load stock data', err));
       } finally {
         setLoading(false);
       }
@@ -39,11 +41,15 @@ const StockDetailPage: React.FC = () => {
   }, [symbol]);
 
   if (loading) {
-    return <div>Loading...</div>;
+    return <div className="p-8 text-center text-text-secondary">Loading stock details...</div>;
+  }
+
+  if (error) {
+    return <div className="p-8 text-center text-danger bg-danger/10 rounded-lg">{error}</div>;
   }
 
   if (!quote) {
-    return <div>Stock not found.</div>;
+    return <div className="p-8 text-center text-text-secondary">Stock symbol '{symbol}' not found.</div>;
   }
   
   const isPositive = quote.change >= 0;

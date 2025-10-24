@@ -1,21 +1,24 @@
 export const formatErrorMessage = (context: string, error: unknown): string => {
-    // 1. Log the original error for developers
+    // 1. Log the original error for developers to see the raw error object
     console.error(context, error);
 
-    // 2. Safely extract a message string, starting with a default
-    let message = 'An unexpected error occurred. Check the console for details.';
+    // 2. Safely extract a message string
+    let message: string;
 
     if (error instanceof Error) {
         message = error.message;
-    } else if (error && typeof error === 'object') {
-        const err = error as { message?: string; details?: string };
-        if (typeof err.message === 'string' && err.message) {
-            message = err.message;
-        } else if (typeof err.details === 'string' && err.details) {
-            message = err.details;
-        }
+    } else if (error && typeof error === 'object' && 'message' in error && typeof (error as any).message === 'string') {
+        message = (error as any).message;
+    } else if (error && typeof error === 'object' && 'details' in error && typeof (error as any).details === 'string') {
+        message = (error as any).details;
     } else if (typeof error === 'string' && error) {
         message = error;
+    } else {
+        try {
+            message = JSON.stringify(error);
+        } catch {
+            message = 'An unexpected error occurred. Check the console for details.';
+        }
     }
 
     // 3. Convert common technical errors into more user-friendly advice.
