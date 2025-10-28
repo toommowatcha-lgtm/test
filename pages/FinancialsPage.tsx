@@ -137,6 +137,26 @@ const FinancialsPage: React.FC = () => {
     const [newlyAddedId, setNewlyAddedId] = useState<string | null>(null);
     const [activeTab, setActiveTab] = useState<'quarterly' | 'annual'>('quarterly');
 
+    // State for swipe-to-delete
+    const [swipedMetricId, setSwipedMetricId] = useState<string | null>(null);
+    const swipeStartRef = useRef<{ x: number; y: number; time: number } | null>(null);
+    const swipedRowRef = useRef<HTMLTableCellElement | null>(null);
+
+    // Effect to handle clicks outside of a swiped row to close it
+    useEffect(() => {
+        if (!swipedMetricId) return;
+
+        const handleClickOutside = (event: MouseEvent) => {
+            if (swipedRowRef.current && !swipedRowRef.current.contains(event.target as Node)) {
+                setSwipedMetricId(null);
+            }
+        };
+        
+        document.addEventListener('mousedown', handleClickOutside);
+        return () => {
+            document.removeEventListener('mousedown', handleClickOutside);
+        };
+    }, [swipedMetricId]);
 
     const showSaveStatus = useCallback((status: SaveStatus, customError?: string) => {
         setSaveStatus(status);
@@ -415,40 +435,40 @@ const FinancialsPage: React.FC = () => {
     };
     
     const deleteItem = async (type: 'metric' | 'sub' | 'period', id: string) => {
-        const table = type === 'metric' ? 'financial_metric' : type === 'sub' ? 'financial_subsegment' : 'financial_period';
-        if (!confirm(`Delete this ${type}? This cannot be undone.`)) return;
+        if (!confirm(`Are you sure you want to delete this ${type}? This cannot be undone.`)) return;
 
-        showSaveStatus('saving');
+        setSaveStatus('saving');
         try {
-            if (type === 'sub') {
-                const parentMetric = metrics.find(m => m.financial_subsegments.some(s => s.id === id));
-                if (parentMetric) {
-                    const updatedParentValuesPayload = periods.map(p => {
-                        const total = parentMetric.financial_subsegments
-                            .filter(s => s.id !== id)
-                            .reduce((sum, sub) => sum + (sub.financial_values.find(v => v.period_id === p.id)?.value || 0), 0);
-                        return { stock_id: stockId, metric_id: parentMetric.id, subsegment_id: null, period_id: p.id, value: total };
-                    });
-                    
-                    if (updatedParentValuesPayload.length > 0) {
-                        await debouncedSave.flush();
-                        await debouncedSave(updatedParentValuesPayload);
-                    }
-                }
-            }
+            if (type === 'metric') {
+                // Delete all values for this metric (with or without subsegments)
+                const { error: valueError } = await supabase.from('financial_values').delete().eq('metric_id', id);
+                if (valueError) throw valueError;
 
-            const { error } = await supabase.from(table).delete().match({ id });
-            if (error) throw error;
-            
-            showSaveStatus('saved');
-            if (type === 'metric') setMetrics(prev => prev.filter(m => m.id !== id));
-            else if (type === 'sub') {
-                setMetrics(prev => prev.map(m => ({
-                    ...m,
-                    financial_subsegments: m.financial_subsegments.filter(s => s.id !== id)
-                })));
-            }
-            else if (type === 'period') {
+                // Delete all subsegments for this metric
+                const { error: subError } = await supabase.from('financial_subsegment').delete().eq('metric_id', id);
+                if (subError) throw subError;
+
+                // Finally, delete the metric itself
+                const { error: metricError } = await supabase.from('financial_metric').delete().eq('id', id);
+                if (metricError) throw metricError;
+
+                setMetrics(prev => prev.filter(m => m.id !== id));
+                setSwipedMetricId(null); // Close the swipe UI
+            } else if (type === 'sub') {
+                // First, delete values associated with the subsegment
+                const { error: valueError } = await supabase.from('financial_values').delete().eq('subsegment_id', id);
+                if (valueError) throw valueError;
+                
+                // Then, delete the subsegment record itself
+                const { error: subDeleteError } = await supabase.from('financial_subsegment').delete().match({ id });
+                if (subDeleteError) throw subDeleteError;
+                
+                // Refetch data to ensure parent totals are recalculated and state is consistent
+                await fetchData();
+            } else if (type === 'period') {
+                const { error } = await supabase.from('financial_period').delete().match({ id });
+                if (error) throw error;
+                
                 setPeriods(prev => prev.filter(p => p.id !== id));
                 setMetrics(prevMetrics => prevMetrics.map(m => ({
                     ...m,
@@ -459,11 +479,54 @@ const FinancialsPage: React.FC = () => {
                     }))
                 })));
             }
+            showSaveStatus('saved');
         } catch (err) {
             showSaveStatus('error', formatErrorMessage(`Failed to delete ${type}`, err));
         }
-    }
+    };
     
+    // Swipe-to-delete handlers
+    const handleSwipeStart = (
+        e: React.TouchEvent<HTMLDivElement> | React.MouseEvent<HTMLDivElement>,
+        metricId: string
+    ) => {
+        if ('button' in e && e.button !== 0) return; // Only handle left-clicks
+        if (swipedMetricId && swipedMetricId !== metricId) {
+            setSwipedMetricId(null);
+        }
+        const point = 'touches' in e ? e.touches[0] : e;
+        swipeStartRef.current = { x: point.clientX, y: point.clientY, time: Date.now() };
+    };
+
+    const handleSwipeEnd = (
+        e: React.TouchEvent<HTMLDivElement> | React.MouseEvent<HTMLDivElement>,
+        metricId: string
+    ) => {
+        if (!swipeStartRef.current) return;
+        const point = 'changedTouches' in e ? e.changedTouches[0] : e;
+        const { x: startX, y: startY, time } = swipeStartRef.current;
+
+        const duration = Date.now() - time;
+        if (duration < 300 && Math.abs(point.clientX - startX) < 10 && Math.abs(point.clientY - startY) < 10) {
+            swipeStartRef.current = null;
+            return; // It's a click, let the EditableHeader handle it.
+        }
+
+        const deltaX = startX - point.clientX;
+        const deltaY = Math.abs(startY - point.clientY);
+
+        if (Math.abs(deltaX) > deltaY + 10) { // Horizontal swipe
+            if (deltaX > 50) { // Swipe left to open
+                setSwipedMetricId(metricId);
+            } else if (deltaX < -50) { // Swipe right to close
+                setSwipedMetricId(null);
+            }
+        }
+        
+        swipeStartRef.current = null;
+    };
+
+
     const {
         quarterlyChartData,
         annualChartData,
@@ -475,7 +538,6 @@ const FinancialsPage: React.FC = () => {
             return match ? match[1] : null;
         };
 
-        // FIX: Add explicit types to iterator variables to prevent incorrect type inference.
         const quarterlyData = periods.map((p: FinancialPeriod) => {
             const entry: Record<string, string | number> = { period_label: p.period_label };
             metrics.forEach((m: FinancialMetric) => {
@@ -490,13 +552,10 @@ const FinancialsPage: React.FC = () => {
             return entry;
         });
         
-        // FIX: Add explicit types to iterator variables to prevent incorrect type inference.
-        // Fix: Use a type guard with .filter to ensure `uniqueYears` is correctly typed as `string[]`, which resolves all subsequent type errors.
         const uniqueYears = [...new Set(periods.map((p: FinancialPeriod) => getYear(p.period_label)).filter((y): y is string => y !== null))].sort();
         const annualPeriodsForTable = uniqueYears.map((year: string) => ({ id: year, period_label: year, display_order: parseInt(year), period_type: 'annual' as 'annual', created_at: '' }));
         const aggregatedValues: Record<string, Record<string, number>> = {}; // { [metric/sub_id]: { [year]: value } }
 
-        // FIX: Add explicit types to iterator variables to prevent incorrect type inference.
         metrics.forEach((metric: FinancialMetric) => {
             aggregatedValues[metric.id] = {};
             metric.financial_subsegments.forEach((sub: FinancialSubsegment) => {
@@ -528,7 +587,6 @@ const FinancialsPage: React.FC = () => {
             });
         });
 
-        // FIX: Add explicit types to iterator variables to prevent incorrect type inference.
         const annualDataForChart = uniqueYears.map((year: string) => {
             const entry: Record<string, string | number> = { period_label: year };
             metrics.forEach((m: FinancialMetric) => {
@@ -604,7 +662,41 @@ const FinancialsPage: React.FC = () => {
                             {metrics.map(metric => (
                                 <React.Fragment key={metric.id}>
                                     <tr className="bg-content/50">
-                                        <td className="p-2 font-bold sticky left-0 bg-content z-10 w-52"><EditableHeader id={metric.id} initialValue={metric.metric_name} onUpdate={handleNameUpdate.bind(null, 'metric')} onDelete={deleteItem.bind(null, 'metric')} isMetric /></td>
+                                        <td ref={swipedMetricId === metric.id ? swipedRowRef : null} className="p-0 font-bold sticky left-0 bg-content z-10 w-52">
+                                            <div className="relative w-full h-full overflow-hidden">
+                                                {/* Delete Action (Revealed on swipe) */}
+                                                <div className="absolute top-0 right-0 h-full w-20 bg-danger flex items-center justify-center text-white">
+                                                    <Button
+                                                        variant="danger"
+                                                        className="p-2 h-full w-full flex items-center justify-center rounded-none"
+                                                        onClick={() => {
+                                                            deleteItem('metric', metric.id);
+                                                            setSwipedMetricId(null);
+                                                        }}
+                                                        aria-label={`Delete metric ${metric.metric_name}`}
+                                                    >
+                                                        <Trash2 className="w-5 h-5" />
+                                                    </Button>
+                                                </div>
+                                                {/* Swipable Content */}
+                                                <div
+                                                    className={`relative w-full h-full bg-content transition-transform duration-300 ease-in-out`}
+                                                    style={{ transform: `translateX(${swipedMetricId === metric.id ? -80 : 0}px)` }}
+                                                    onTouchStart={(e) => handleSwipeStart(e, metric.id)}
+                                                    onTouchEnd={(e) => handleSwipeEnd(e, metric.id)}
+                                                    onMouseDown={(e) => handleSwipeStart(e, metric.id)}
+                                                    onMouseUp={(e) => handleSwipeEnd(e, metric.id)}
+                                                >
+                                                    <EditableHeader
+                                                        id={metric.id}
+                                                        initialValue={metric.metric_name}
+                                                        onUpdate={handleNameUpdate.bind(null, 'metric')}
+                                                        onDelete={deleteItem.bind(null, 'metric')}
+                                                        isMetric
+                                                    />
+                                                </div>
+                                            </div>
+                                        </td>
                                         {tablePeriods.map(p => <td key={p.id} className="p-1 w-32 text-right pr-3 font-semibold">{metric.financial_subsegments.length > 0 ? (activeTab === 'quarterly' ? valueFormatter(metric.financial_values.find(v => v.period_id === p.id)?.value ?? 0) : valueFormatter(getAnnualValue(metric.id, null, p.period_label))) : (activeTab === 'quarterly' ? <input type="number" step="any" value={metric.financial_values.find(v => v.period_id === p.id)?.value ?? ''} onChange={e => handleValueChange(metric.id, null, p.id, e.target.value)} placeholder="-" className="w-full bg-transparent p-2 text-right rounded hover:bg-accent focus:bg-accent"/> : <div className="w-full bg-transparent p-2 text-right rounded">{valueFormatter(getAnnualValue(metric.id, null, p.period_label))}</div>)}</td>)}
                                         {activeTab === 'quarterly' && <td></td>}
                                     </tr>
