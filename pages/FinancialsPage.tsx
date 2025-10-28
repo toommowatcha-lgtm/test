@@ -27,21 +27,19 @@ const ChartSummary: React.FC<{ annualData: Record<string, string | number>[], me
         const color = value > 0 ? 'text-success' : value < 0 ? 'text-danger' : 'text-text-secondary';
         return <span className={color}>{value > 0 ? '+' : ''}{formatted}</span>;
     };
-
-    const getMetricTotal = (metric: FinancialMetric, dataPoint: Record<string, string | number>): number => {
-        if (metric.financial_subsegments.length > 0) {
-            return metric.financial_subsegments.reduce((sum, sub) => sum + (Number(dataPoint[sub.subsegment_name]) || 0), 0);
-        }
-        return Number(dataPoint[metric.metric_name]) || 0;
-    };
     
     const summaryData = metrics
       .filter(m => selectedChartItems[`metric-${m.id}`])
       .map(metric => {
-        const values = annualData.map(d => ({
-            period: d.period_label as string,
-            value: getMetricTotal(metric, d)
-        })).filter(item => item.value !== 0 && isFinite(item.value));
+        const values = annualData.map(d => {
+            const value = metric.financial_subsegments.length > 0
+                ? metric.financial_subsegments.reduce((sum, sub) => sum + (Number(d[`subsegment-${sub.id}`]) || 0), 0)
+                : Number(d[`metric-${metric.id}`]) || 0;
+            return {
+                period: d.period_label as string,
+                value,
+            };
+        }).filter(item => item.value !== 0 && isFinite(item.value));
         
         if (values.length < 2) return { name: metric.metric_name, totalChange: null, cagr: null };
 
@@ -139,9 +137,9 @@ const FinancialsPage: React.FC = () => {
         setTimeout(() => setSaveStatus('idle'), status === 'saved' ? 2000 : 5000);
     }, []);
 
-    const fetchData = useCallback(async (showLoading = true) => {
+    const fetchData = useCallback(async () => {
         if (!stockId) return;
-        if (showLoading) setLoading(true);
+        setLoading(true);
         setError(null);
         try {
             const [stockRes, metricsRes, subsegmentsRes, valuesRes, periodsRes] = await Promise.all([
@@ -179,7 +177,7 @@ const FinancialsPage: React.FC = () => {
         } catch (err) {
             setError(formatErrorMessage('Failed to load financials', err));
         } finally {
-            if (showLoading) setLoading(false);
+            setLoading(false);
         }
     }, [stockId]);
 
@@ -267,21 +265,40 @@ const FinancialsPage: React.FC = () => {
         const isDuplicate = type === 'period' && periods.some(p => p.id !== id && p.period_label === newName);
         if (isDuplicate) {
             showSaveStatus('error', `Period "${newName}" already exists.`);
-            await fetchData(false); return;
+            const oldName = periods.find(p => p.id === id)?.period_label;
+            if(oldName) setPeriods(prev => prev.map(p => p.id === id ? {...p, period_label: oldName} : p));
+            return;
         }
 
         setSaveStatus('saving');
         const { error } = await supabase.from(table).update({ [nameField]: newName }).match({ id });
-        if (error) showSaveStatus('error', formatErrorMessage(`Failed to update ${type}`, error));
-        else { showSaveStatus('saved'); fetchData(false); }
+        if (error) {
+            showSaveStatus('error', formatErrorMessage(`Failed to update ${type}`, error));
+            fetchData();
+        } else { 
+            showSaveStatus('saved'); 
+            if (type === 'metric') {
+                setMetrics(prev => prev.map(m => m.id === id ? { ...m, metric_name: newName } : m));
+            } else if (type === 'sub') {
+                setMetrics(prev => prev.map(m => ({
+                    ...m,
+                    financial_subsegments: m.financial_subsegments.map(s => s.id === id ? { ...s, subsegment_name: newName } : s)
+                })));
+            } else if (type === 'period') {
+                setPeriods(prev => prev.map(p => p.id === id ? { ...p, period_label: newName } : p));
+            }
+        }
     };
 
     const addMetric = async () => {
         if (!stockId) return;
+        showSaveStatus('saving');
         const { data, error } = await supabase.from('financial_metric').insert({ stock_id: stockId, metric_name: 'New Metric', display_order: metrics.length }).select().single();
         if (error) { showSaveStatus('error', formatErrorMessage('Failed to add metric', error)); return; }
         if (!data) { showSaveStatus('error', 'Failed to add metric: No data returned from server.'); return; }
-        await fetchData(false);
+        const newMetric: FinancialMetric = { ...data, financial_subsegments: [], financial_values: [] };
+        setMetrics(prev => [...prev, newMetric]);
+        showSaveStatus('saved');
     };
 
     const addSubsegment = async (metric_id: string) => {
@@ -290,24 +307,35 @@ const FinancialsPage: React.FC = () => {
 
         showSaveStatus('saving');
         try {
+            let parentValuesToUpdate: FinancialValue[] = [];
             if (parentMetric.financial_subsegments.length === 0 && parentMetric.financial_values.length > 0) {
                 const { error: deleteError } = await supabase.from('financial_values').delete().match({ metric_id: metric_id, subsegment_id: null });
                 if (deleteError) throw deleteError;
 
-                const zeroedParentValues = periods.map(p => ({
-                    stock_id: stockId, metric_id: parentMetric.id, subsegment_id: null, period_id: p.id, value: 0
+                parentValuesToUpdate = periods.map(p => ({
+                    id: crypto.randomUUID(), stock_id: stockId, metric_id: parentMetric.id, subsegment_id: null, period_id: p.id, value: 0, created_at: new Date().toISOString()
                 }));
-                if (zeroedParentValues.length > 0) {
-                    const { error: upsertError } = await supabase.from('financial_values').upsert(zeroedParentValues, { onConflict: 'stock_id,metric_id,subsegment_id,period_id' });
+                if (parentValuesToUpdate.length > 0) {
+                    const { error: upsertError } = await supabase.from('financial_values').upsert(parentValuesToUpdate, { onConflict: 'stock_id,metric_id,subsegment_id,period_id' });
                     if (upsertError) throw upsertError;
                 }
             }
 
-            const { error: insertError } = await supabase.from('financial_subsegment').insert({ metric_id, subsegment_name: 'New Sub-segment', display_order: parentMetric.financial_subsegments.length });
+            const { data: newSubData, error: insertError } = await supabase.from('financial_subsegment').insert({ metric_id, subsegment_name: 'New Sub-segment', display_order: parentMetric.financial_subsegments.length }).select().single();
             if (insertError) throw insertError;
+            if (!newSubData) throw new Error("No data returned for new sub-segment.");
 
+            const newSub: FinancialSubsegment = { ...newSubData, financial_values: [] };
+            setMetrics(prevMetrics => prevMetrics.map(m => {
+                if (m.id === metric_id) {
+                    const updatedMetric = { ...m };
+                    if (parentValuesToUpdate.length > 0) updatedMetric.financial_values = parentValuesToUpdate;
+                    updatedMetric.financial_subsegments = [...m.financial_subsegments, newSub];
+                    return updatedMetric;
+                }
+                return m;
+            }));
             showSaveStatus('saved');
-            await fetchData(false);
         } catch (err) {
             showSaveStatus('error', formatErrorMessage('Failed to add sub-segment', err));
         }
@@ -316,11 +344,13 @@ const FinancialsPage: React.FC = () => {
     const addPeriod = async () => {
         if (!stockId) return;
         const newLabel = `Q${(periods.length % 4) + 1} ${new Date().getFullYear() + Math.floor(periods.length / 4)}`;
+        showSaveStatus('saving');
         const { data, error } = await supabase.from('financial_period').insert({ stock_id: stockId, period_label: newLabel, period_type: 'quarter', display_order: periods.length }).select().single();
         if (error) { showSaveStatus('error', formatErrorMessage('Failed to add period', error)); return; }
         if (!data) { showSaveStatus('error', 'Failed to add period: No data returned from server.'); return; }
-        await fetchData(false); // Refetch to get new period and triggered values
+        setPeriods(prev => [...prev, data]);
         setNewlyAddedId(data.id);
+        showSaveStatus('saved');
     };
     
     const deleteItem = async (type: 'metric' | 'sub' | 'period', id: string) => {
@@ -330,17 +360,18 @@ const FinancialsPage: React.FC = () => {
         showSaveStatus('saving');
         try {
             if (type === 'sub') {
+                // Recalculate parent total before deleting the subsegment
                 const parentMetric = metrics.find(m => m.financial_subsegments.some(s => s.id === id));
                 if (parentMetric) {
-                    const updatedParentValues = periods.map(p => {
+                    const updatedParentValuesPayload = periods.map(p => {
                         const total = parentMetric.financial_subsegments
                             .filter(s => s.id !== id)
                             .reduce((sum, sub) => sum + (sub.financial_values.find(v => v.period_id === p.id)?.value || 0), 0);
                         return { stock_id: stockId, metric_id: parentMetric.id, subsegment_id: null, period_id: p.id, value: total };
                     });
                     
-                    if (updatedParentValues.length > 0) {
-                        const { error: parentUpdateError } = await supabase.from('financial_values').upsert(updatedParentValues, { onConflict: 'stock_id,metric_id,subsegment_id,period_id' });
+                    if (updatedParentValuesPayload.length > 0) {
+                        const { error: parentUpdateError } = await supabase.from('financial_values').upsert(updatedParentValuesPayload, { onConflict: 'stock_id,metric_id,subsegment_id,period_id' });
                         if (parentUpdateError) throw parentUpdateError;
                     }
                 }
@@ -350,12 +381,30 @@ const FinancialsPage: React.FC = () => {
             if (error) throw error;
             
             showSaveStatus('saved');
-            await fetchData(false);
+            if (type === 'metric') setMetrics(prev => prev.filter(m => m.id !== id));
+            else if (type === 'sub') {
+                setMetrics(prev => prev.map(m => ({
+                    ...m,
+                    financial_subsegments: m.financial_subsegments.filter(s => s.id !== id)
+                })));
+            }
+            else if (type === 'period') {
+                setPeriods(prev => prev.filter(p => p.id !== id));
+                setMetrics(prevMetrics => prevMetrics.map(m => ({
+                    ...m,
+                    financial_values: m.financial_values.filter(v => v.period_id !== id),
+                    financial_subsegments: m.financial_subsegments.map(s => ({
+                       ...s,
+                       financial_values: s.financial_values.filter(v => v.period_id !== id)
+                    }))
+                })));
+            }
         } catch (err) {
             showSaveStatus('error', formatErrorMessage(`Failed to delete ${type}`, err));
         }
     }
     
+    // FIX: Changed v from unknown to any to fix cascading type inference errors.
     const valueFormatter = (v: any): string => (typeof v === 'number') ? new Intl.NumberFormat('en-US', { notation: 'compact', compactDisplay: 'short' }).format(v) : String(v);
 
     const {
@@ -369,20 +418,22 @@ const FinancialsPage: React.FC = () => {
             return match ? match[1] : null;
         };
 
-        const quarterly = periods.map(p => {
+        const quarterlyData = periods.map(p => {
             const entry: Record<string, string | number> = { period_label: p.period_label };
             metrics.forEach(m => {
                 if (m.financial_subsegments.length > 0) {
-                    m.financial_subsegments.forEach(s => { entry[s.subsegment_name] = s.financial_values.find(v => v.period_id === p.id)?.value ?? 0; });
+                    m.financial_subsegments.forEach(s => { 
+                        entry[`subsegment-${s.id}`] = s.financial_values.find(v => v.period_id === p.id)?.value ?? 0; 
+                    });
                 } else {
-                    entry[m.metric_name] = m.financial_values.find(v => v.period_id === p.id)?.value ?? 0;
+                    entry[`metric-${m.id}`] = m.financial_values.find(v => v.period_id === p.id && !v.subsegment_id)?.value ?? 0;
                 }
             });
             return entry;
         });
         
         const uniqueYears = [...new Set(periods.map(p => getYear(p.period_label)).filter(Boolean))].sort();
-        const annualPeriodsForTable = uniqueYears.map(year => ({ id: year, period_label: year, display_order: parseInt(year), period_type: 'annual' }));
+        const annualPeriodsForTable = uniqueYears.map(year => ({ id: year, period_label: year, display_order: parseInt(year), period_type: 'annual' as 'annual', created_at: '' }));
         const aggregatedValues: Record<string, Record<string, number>> = {}; // { [metric/sub_id]: { [year]: value } }
 
         metrics.forEach(metric => {
@@ -416,15 +467,15 @@ const FinancialsPage: React.FC = () => {
             });
         });
 
-        const annualForChart = uniqueYears.map(year => {
+        const annualDataForChart = uniqueYears.map(year => {
             const entry: Record<string, string | number> = { period_label: year };
             metrics.forEach(m => {
                 if (m.financial_subsegments.length > 0) {
                     m.financial_subsegments.forEach(s => {
-                        entry[s.subsegment_name] = aggregatedValues[s.id]?.[year] ?? 0;
+                        entry[`subsegment-${s.id}`] = aggregatedValues[s.id]?.[year] ?? 0;
                     });
                 } else {
-                    entry[m.metric_name] = aggregatedValues[m.id]?.[year] ?? 0;
+                    entry[`metric-${m.id}`] = aggregatedValues[m.id]?.[year] ?? 0;
                 }
             });
             return entry;
@@ -436,8 +487,8 @@ const FinancialsPage: React.FC = () => {
         };
 
         return {
-            quarterlyChartData: quarterly,
-            annualChartData: annualForChart,
+            quarterlyChartData: quarterlyData,
+            annualChartData: annualDataForChart,
             annualPeriods: annualPeriodsForTable,
             getAnnualValue: getAnnualValueHelper,
         };
@@ -478,7 +529,7 @@ const FinancialsPage: React.FC = () => {
                 </div>
                 <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-x-4 gap-y-2 mb-4">{metrics.map(m => (<div key={m.id}><label className="flex items-center space-x-2 cursor-pointer font-bold"><input type="checkbox" checked={!!selectedChartItems[`metric-${m.id}`]} onChange={() => setSelectedChartItems(p => ({...p, [`metric-${m.id}`]: !p[`metric-${m.id}`]}))} className="form-checkbox h-5 w-5 rounded bg-accent border-gray-600 text-primary focus:ring-primary"/><span className="truncate">{m.metric_name}</span></label></div>))}</div>
                 <div style={{ width: '100%', height: 400 }}>
-                    <ResponsiveContainer>{chartDataSource.length > 0 ? <ComposedChart data={chartDataSource} margin={{ top: 5, right: 20, left: 0, bottom: 5 }}><CartesianGrid strokeDasharray="3 3" stroke="#374151" /><XAxis dataKey="period_label" stroke="#d1d5db" /><YAxis stroke="#d1d5db" tickFormatter={valueFormatter} /><Tooltip contentStyle={{ backgroundColor: '#1f2937', border: '1px solid #374151' }} formatter={valueFormatter} /><Legend />{metrics.filter(m => selectedChartItems[`metric-${m.id}`]).map((m, i) => chartType === 'bar' ? m.financial_subsegments.length > 0 ? m.financial_subsegments.map((s, j) => <Bar key={s.id} dataKey={s.subsegment_name} stackId={m.id} fill={COLORS[(i*3 + j) % COLORS.length]} />) : <Bar key={m.id} dataKey={m.metric_name} fill={COLORS[i % COLORS.length]} /> : m.financial_subsegments.length > 0 ? m.financial_subsegments.map((s, j) => <Line key={s.id} type="monotone" dataKey={s.subsegment_name} stroke={COLORS[(i*3 + j) % COLORS.length]} />) : <Line key={m.id} type="monotone" dataKey={m.metric_name} stroke={COLORS[i % COLORS.length]} />)}</ComposedChart> : <div className="flex items-center justify-center h-full text-text-secondary">Add data and select metrics to see the chart.</div>}</ResponsiveContainer>
+                    <ResponsiveContainer>{(chartDataSource.length > 0 && metrics.length > 0) ? <ComposedChart data={chartDataSource} margin={{ top: 5, right: 20, left: 0, bottom: 5 }}><CartesianGrid strokeDasharray="3 3" stroke="#374151" /><XAxis dataKey="period_label" stroke="#d1d5db" /><YAxis stroke="#d1d5db" tickFormatter={valueFormatter} /><Tooltip contentStyle={{ backgroundColor: '#1f2937', border: '1px solid #374151' }} formatter={valueFormatter} /><Legend />{metrics.filter(m => selectedChartItems[`metric-${m.id}`]).map((m, i) => (chartType === 'bar' ? (m.financial_subsegments.length > 0 ? m.financial_subsegments.map((s, j) => <Bar key={s.id} dataKey={`subsegment-${s.id}`} name={s.subsegment_name} stackId={m.id} fill={COLORS[(i*3 + j) % COLORS.length]} />) : <Bar key={m.id} dataKey={`metric-${m.id}`} name={m.metric_name} fill={COLORS[i % COLORS.length]} />) : (m.financial_subsegments.length > 0 ? m.financial_subsegments.map((s, j) => <Line key={s.id} type="monotone" dataKey={`subsegment-${s.id}`} name={s.subsegment_name} stroke={COLORS[(i*3 + j) % COLORS.length]} />) : <Line key={m.id} type="monotone" dataKey={`metric-${m.id}`} name={m.metric_name} stroke={COLORS[i % COLORS.length]} />)))}</ComposedChart> : <div className="flex items-center justify-center h-full text-text-secondary">Add data and select metrics to see the chart.</div>}</ResponsiveContainer>
                 </div>
                 <ChartSummary annualData={annualChartData} metrics={metrics} selectedChartItems={selectedChartItems} />
             </Card>
@@ -492,13 +543,13 @@ const FinancialsPage: React.FC = () => {
                                 <React.Fragment key={metric.id}>
                                     <tr className="bg-content/50">
                                         <td className="p-2 font-bold sticky left-0 bg-content z-10 w-52"><EditableHeader id={metric.id} initialValue={metric.metric_name} onUpdate={handleNameUpdate.bind(null, 'metric')} onDelete={deleteItem.bind(null, 'metric')} isMetric /></td>
-                                        {tablePeriods.map(p => <td key={p.id} className="p-1 w-32 text-right pr-3 font-semibold">{metric.financial_subsegments.length > 0 ? (activeTab === 'quarterly' ? valueFormatter(metric.financial_values.find(v => v.period_id === p.id)?.value ?? 0) : valueFormatter(getAnnualValue(metric.id, null, p.period_label))) : (activeTab === 'quarterly' ? <input type="number" step="any" defaultValue={metric.financial_values.find(v => v.period_id === p.id)?.value ?? ''} onChange={e => handleValueChange(metric.id, null, p.id, e.target.value)} placeholder="-" className="w-full bg-transparent p-2 text-right rounded hover:bg-accent focus:bg-accent"/> : <div className="w-full bg-transparent p-2 text-right rounded">{valueFormatter(getAnnualValue(metric.id, null, p.period_label))}</div>)}</td>)}
+                                        {tablePeriods.map(p => <td key={p.id} className="p-1 w-32 text-right pr-3 font-semibold">{metric.financial_subsegments.length > 0 ? (activeTab === 'quarterly' ? valueFormatter(metric.financial_values.find(v => v.period_id === p.id)?.value ?? 0) : valueFormatter(getAnnualValue(metric.id, null, p.period_label))) : (activeTab === 'quarterly' ? <input type="number" step="any" value={metric.financial_values.find(v => v.period_id === p.id)?.value ?? ''} onChange={e => handleValueChange(metric.id, null, p.id, e.target.value)} placeholder="-" className="w-full bg-transparent p-2 text-right rounded hover:bg-accent focus:bg-accent"/> : <div className="w-full bg-transparent p-2 text-right rounded">{valueFormatter(getAnnualValue(metric.id, null, p.period_label))}</div>)}</td>)}
                                         {activeTab === 'quarterly' && <td></td>}
                                     </tr>
                                     {metric.financial_subsegments.map(sub => (
                                         <tr key={sub.id} className="hover:bg-accent/20">
                                             <td className="p-2 pl-6 sticky left-0 bg-content z-10 w-52"><EditableHeader id={sub.id} initialValue={sub.subsegment_name} onUpdate={handleNameUpdate.bind(null, 'sub')} onDelete={deleteItem.bind(null, 'sub')} isMetric /></td>
-                                            {tablePeriods.map(p => <td key={p.id} className="p-1 w-32">{activeTab === 'quarterly' ? <input type="number" step="any" defaultValue={sub.financial_values.find(v => v.period_id === p.id)?.value ?? ''} onChange={e => handleValueChange(metric.id, sub.id, p.id, e.target.value)} placeholder="-" className="w-full bg-transparent p-2 text-right rounded hover:bg-accent focus:bg-accent"/> : <div className="w-full bg-transparent p-2 text-right rounded">{valueFormatter(getAnnualValue(metric.id, sub.id, p.period_label))}</div>}</td>)}
+                                            {tablePeriods.map(p => <td key={p.id} className="p-1 w-32">{activeTab === 'quarterly' ? <input type="number" step="any" value={sub.financial_values.find(v => v.period_id === p.id)?.value ?? ''} onChange={e => handleValueChange(metric.id, sub.id, p.id, e.target.value)} placeholder="-" className="w-full bg-transparent p-2 text-right rounded hover:bg-accent focus:bg-accent"/> : <div className="w-full bg-transparent p-2 text-right rounded">{valueFormatter(getAnnualValue(metric.id, sub.id, p.period_label))}</div>}</td>)}
                                             {activeTab === 'quarterly' && <td></td>}
                                         </tr>
                                     ))}

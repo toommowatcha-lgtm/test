@@ -56,6 +56,7 @@ type PowerLevel = 'Weak' | 'Normal' | 'High' | null;
 const MoatPowerEditor = ({ label, level, note, onUpdate, tooltip }: {
     label: string;
     level: PowerLevel;
+    // FIX: Changed note type back to `string | null` for consistency with the data model.
     note: string | null;
     onUpdate: (field: 'power_level' | 'power_note', value: string) => void;
     tooltip?: string;
@@ -105,6 +106,7 @@ const MoatPowerEditor = ({ label, level, note, onUpdate, tooltip }: {
             </div>
             <div className="mt-3">
                 <textarea
+                    // FIX: Added `|| ''` to handle null values for the note.
                     value={note || ''}
                     onChange={(e) => onUpdate('power_note', e.target.value)}
                     rows={2}
@@ -187,7 +189,7 @@ const DetailPage: React.FC = () => {
                         power_note: existingPower?.power_note || ''
                     };
                 });
-                setMoatPowers(initialPowers);
+                setMoatPowers(initialPowers as MoatPower[]);
 
             } catch (err) {
                 setError(formatErrorMessage('Could not load stock data', err));
@@ -276,6 +278,7 @@ const DetailPage: React.FC = () => {
                                 label={power.power_name}
                                 tooltip={POWER_DEFINITIONS.find(p => p.name === power.power_name)?.tooltip}
                                 level={power.power_level}
+                                // FIX: Pass `power.power_note` directly as the component now handles null.
                                 note={power.power_note}
                                 onUpdate={(field, value) => handlePowerUpdate(power.power_name, field, value)}
                             />
