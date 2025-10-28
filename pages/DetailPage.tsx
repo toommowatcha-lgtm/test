@@ -53,14 +53,16 @@ const EditableTextarea = ({ label, value, onChange, placeholder, rows = 3 }: {
 
 type PowerLevel = 'Weak' | 'Normal' | 'High' | null;
 
-const MoatPowerEditor = ({ label, level, note, onUpdate, tooltip }: {
+// Fix: Extracted props to a type and used React.FC to correctly type the component for use with React-specific props like `key`.
+type MoatPowerEditorProps = {
     label: string;
     level: PowerLevel;
-    // FIX: Changed note type back to `string | null` for consistency with the data model.
-    note: string | null;
+    note: string;
     onUpdate: (field: 'power_level' | 'power_note', value: string) => void;
     tooltip?: string;
-}) => {
+};
+
+const MoatPowerEditor: React.FC<MoatPowerEditorProps> = ({ label, level, note, onUpdate, tooltip }) => {
     const levels: Array<'Weak' | 'Normal' | 'High'> = ['Weak', 'Normal', 'High'];
 
     const getButtonClasses = (btnLevel: 'Weak' | 'Normal' | 'High') => {
@@ -106,8 +108,8 @@ const MoatPowerEditor = ({ label, level, note, onUpdate, tooltip }: {
             </div>
             <div className="mt-3">
                 <textarea
-                    // FIX: Added `|| ''` to handle null values for the note.
-                    value={note || ''}
+                    // FIX: Removed `|| ''` as the `note` prop is now guaranteed to be a string.
+                    value={note}
                     onChange={(e) => onUpdate('power_note', e.target.value)}
                     rows={2}
                     className="w-full bg-accent p-2 rounded border border-gray-600 focus:ring-primary focus:border-primary text-sm"
@@ -278,8 +280,7 @@ const DetailPage: React.FC = () => {
                                 label={power.power_name}
                                 tooltip={POWER_DEFINITIONS.find(p => p.name === power.power_name)?.tooltip}
                                 level={power.power_level}
-                                // FIX: Pass `power.power_note` directly as the component now handles null.
-                                note={power.power_note}
+                                note={power.power_note || ''}
                                 onUpdate={(field, value) => handlePowerUpdate(power.power_name, field, value)}
                             />
                         ))}

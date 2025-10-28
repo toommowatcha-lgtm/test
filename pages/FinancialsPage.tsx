@@ -116,6 +116,13 @@ const EditableHeader: React.FC<{ id: string; initialValue: string; onUpdate: (id
     );
 };
 
+// FIX: Changed type from unknown to any for better compatibility with recharts.
+const valueFormatter = (v: any): string => {
+    if (typeof v === 'number') {
+        return new Intl.NumberFormat('en-US', { notation: 'compact', compactDisplay: 'short' }).format(v);
+    }
+    return String(v ?? '');
+};
 
 const FinancialsPage: React.FC = () => {
     const { stockId = '' } = useParams<{ stockId: string }>();
@@ -183,28 +190,72 @@ const FinancialsPage: React.FC = () => {
 
     useEffect(() => { fetchData(); }, [fetchData]);
     
-    const debouncedSave = useCallback(debounce(async (table: string, data: any | any[], conflictFields: string[]) => {
+    const debouncedSave = useCallback(debounce(async (payloads: Partial<FinancialValue>[]) => {
         setSaveStatus('saving');
         try {
-            const { error: upsertError } = await supabase.from(table).upsert(data, { onConflict: conflictFields.join(',') });
-            if (upsertError) throw upsertError;
+            for (const payload of payloads) {
+                const { stock_id, metric_id, period_id, subsegment_id, value } = payload;
+    
+                if (!stock_id || !metric_id || !period_id) continue;
+    
+                let checkQuery = supabase
+                    .from('financial_values')
+                    .select('id')
+                    .eq('stock_id', stock_id)
+                    .eq('metric_id', metric_id)
+                    .eq('period_id', period_id);
+    
+                if (subsegment_id) {
+                    checkQuery = checkQuery.eq('subsegment_id', subsegment_id);
+                } else {
+                    checkQuery = checkQuery.is('subsegment_id', null);
+                }
+    
+                const { data: existing, error: checkError } = await checkQuery;
+    
+                if (checkError) {
+                    throw new Error(`DB check failed: ${checkError.message}`);
+                }
+    
+                if (existing && existing.length > 0) {
+                    // Found at least one record, update the first one to handle duplicates gracefully.
+                    const { error: updateError } = await supabase
+                        .from('financial_values')
+                        .update({ value })
+                        .eq('id', existing[0].id);
+    
+                    if (updateError) {
+                        throw new Error(`Update failed: ${updateError.message}`);
+                    }
+                } else {
+                    // No record found, insert a new one if value is not null/undefined
+                    if (value !== null && value !== undefined) {
+                        const { error: insertError } = await supabase
+                            .from('financial_values')
+                            .insert(payload);
+                        if (insertError) {
+                            throw new Error(`Insert failed: ${insertError.message}`);
+                        }
+                    }
+                }
+            }
             showSaveStatus('saved');
         } catch (err) {
             showSaveStatus('error', formatErrorMessage('Save failed', err));
         }
-    }, 1500), [showSaveStatus]);
+    }, 1500), [stockId, showSaveStatus]);
 
     const handleValueChange = (metric_id: string, subsegment_id: string | null, period_id: string, valueStr: string) => {
         const value = valueStr === '' ? null : parseFloat(valueStr);
-        if (valueStr !== '' && (value === null || isNaN(value))) return;
+        if (valueStr !== '' && isNaN(value as number)) return;
 
         const newMetrics = JSON.parse(JSON.stringify(metrics));
-        const payloadsToSave: any[] = [];
+        const payloadsToSave: Partial<FinancialValue>[] = [];
         
         const metric = newMetrics.find((m: FinancialMetric) => m.id === metric_id);
         if (!metric) return;
 
-        const mainPayload = { stock_id: stockId, metric_id, subsegment_id, period_id, value };
+        const mainPayload: Partial<FinancialValue> = { stock_id: stockId, metric_id, subsegment_id, period_id, value };
         payloadsToSave.push(mainPayload);
 
         const target = subsegment_id
@@ -233,7 +284,7 @@ const FinancialsPage: React.FC = () => {
                 return sum + subValue;
             }, 0);
 
-            const parentMetricPayload = { stock_id: stockId, metric_id, subsegment_id: null, period_id, value: total };
+            const parentMetricPayload: Partial<FinancialValue> = { stock_id: stockId, metric_id, subsegment_id: null, period_id, value: total };
             payloadsToSave.push(parentMetricPayload);
             
             let parentValueUpdated = false;
@@ -254,7 +305,7 @@ const FinancialsPage: React.FC = () => {
         setMetrics(newMetrics);
         
         if (payloadsToSave.length > 0) {
-            debouncedSave('financial_values', payloadsToSave, ['stock_id', 'metric_id', 'subsegment_id', 'period_id']);
+            debouncedSave(payloadsToSave);
         }
     };
     
@@ -302,35 +353,44 @@ const FinancialsPage: React.FC = () => {
     };
 
     const addSubsegment = async (metric_id: string) => {
+        await debouncedSave.flush();
         const parentMetric = metrics.find(m => m.id === metric_id);
         if (!parentMetric) return;
-
+    
         showSaveStatus('saving');
         try {
-            let parentValuesToUpdate: FinancialValue[] = [];
-            if (parentMetric.financial_subsegments.length === 0 && parentMetric.financial_values.length > 0) {
-                const { error: deleteError } = await supabase.from('financial_values').delete().match({ metric_id: metric_id, subsegment_id: null });
-                if (deleteError) throw deleteError;
-
-                parentValuesToUpdate = periods.map(p => ({
-                    id: crypto.randomUUID(), stock_id: stockId, metric_id: parentMetric.id, subsegment_id: null, period_id: p.id, value: 0, created_at: new Date().toISOString()
-                }));
-                if (parentValuesToUpdate.length > 0) {
-                    const { error: upsertError } = await supabase.from('financial_values').upsert(parentValuesToUpdate, { onConflict: 'stock_id,metric_id,subsegment_id,period_id' });
-                    if (upsertError) throw upsertError;
-                }
-            }
-
+            const isFirstSubsegment = parentMetric.financial_subsegments.length === 0;
+    
             const { data: newSubData, error: insertError } = await supabase.from('financial_subsegment').insert({ metric_id, subsegment_name: 'New Sub-segment', display_order: parentMetric.financial_subsegments.length }).select().single();
             if (insertError) throw insertError;
             if (!newSubData) throw new Error("No data returned for new sub-segment.");
-
+    
             const newSub: FinancialSubsegment = { ...newSubData, financial_values: [] };
+    
+            if (isFirstSubsegment && parentMetric.financial_values.length > 0) {
+                // Copy parent's values to the new sub-segment.
+                const valuesToMove = parentMetric.financial_values
+                    .filter(v => v.value !== null && v.value !== 0)
+                    .map(({ id, created_at, ...rest }) => ({ ...rest, subsegment_id: newSubData.id }));
+                
+                if (valuesToMove.length > 0) {
+                    const { error: valuesInsertError } = await supabase.from('financial_values').insert(valuesToMove);
+                    if (valuesInsertError) throw valuesInsertError;
+                    
+                    // Eagerly update local state object
+                    newSub.financial_values = valuesToMove.map(v => ({...v, id: crypto.randomUUID(), created_at: new Date().toISOString()}));
+                }
+            }
+    
+            // Update local state to reflect the new structure.
             setMetrics(prevMetrics => prevMetrics.map(m => {
                 if (m.id === metric_id) {
-                    const updatedMetric = { ...m };
-                    if (parentValuesToUpdate.length > 0) updatedMetric.financial_values = parentValuesToUpdate;
-                    updatedMetric.financial_subsegments = [...m.financial_subsegments, newSub];
+                    const updatedMetric = { ...m, financial_subsegments: [...m.financial_subsegments, newSub] };
+                    // If this was the first subsegment, the parent's values are now derived.
+                    // Its local state should reflect the sum (which is just the new subsegment's value).
+                    if (isFirstSubsegment) {
+                        updatedMetric.financial_values = newSub.financial_values.map(v => ({...v, subsegment_id: null}));
+                    }
                     return updatedMetric;
                 }
                 return m;
@@ -338,6 +398,7 @@ const FinancialsPage: React.FC = () => {
             showSaveStatus('saved');
         } catch (err) {
             showSaveStatus('error', formatErrorMessage('Failed to add sub-segment', err));
+            await fetchData(); // Refetch to ensure consistency on error
         }
     };
 
@@ -360,7 +421,6 @@ const FinancialsPage: React.FC = () => {
         showSaveStatus('saving');
         try {
             if (type === 'sub') {
-                // Recalculate parent total before deleting the subsegment
                 const parentMetric = metrics.find(m => m.financial_subsegments.some(s => s.id === id));
                 if (parentMetric) {
                     const updatedParentValuesPayload = periods.map(p => {
@@ -371,8 +431,8 @@ const FinancialsPage: React.FC = () => {
                     });
                     
                     if (updatedParentValuesPayload.length > 0) {
-                        const { error: parentUpdateError } = await supabase.from('financial_values').upsert(updatedParentValuesPayload, { onConflict: 'stock_id,metric_id,subsegment_id,period_id' });
-                        if (parentUpdateError) throw parentUpdateError;
+                        await debouncedSave.flush();
+                        await debouncedSave(updatedParentValuesPayload);
                     }
                 }
             }
@@ -404,9 +464,6 @@ const FinancialsPage: React.FC = () => {
         }
     }
     
-    // FIX: Changed v from unknown to any to fix cascading type inference errors.
-    const valueFormatter = (v: any): string => (typeof v === 'number') ? new Intl.NumberFormat('en-US', { notation: 'compact', compactDisplay: 'short' }).format(v) : String(v);
-
     const {
         quarterlyChartData,
         annualChartData,
@@ -418,11 +475,12 @@ const FinancialsPage: React.FC = () => {
             return match ? match[1] : null;
         };
 
-        const quarterlyData = periods.map(p => {
+        // FIX: Add explicit types to iterator variables to prevent incorrect type inference.
+        const quarterlyData = periods.map((p: FinancialPeriod) => {
             const entry: Record<string, string | number> = { period_label: p.period_label };
-            metrics.forEach(m => {
+            metrics.forEach((m: FinancialMetric) => {
                 if (m.financial_subsegments.length > 0) {
-                    m.financial_subsegments.forEach(s => { 
+                    m.financial_subsegments.forEach((s: FinancialSubsegment) => { 
                         entry[`subsegment-${s.id}`] = s.financial_values.find(v => v.period_id === p.id)?.value ?? 0; 
                     });
                 } else {
@@ -432,21 +490,24 @@ const FinancialsPage: React.FC = () => {
             return entry;
         });
         
-        const uniqueYears = [...new Set(periods.map(p => getYear(p.period_label)).filter(Boolean))].sort();
-        const annualPeriodsForTable = uniqueYears.map(year => ({ id: year, period_label: year, display_order: parseInt(year), period_type: 'annual' as 'annual', created_at: '' }));
+        // FIX: Add explicit types to iterator variables to prevent incorrect type inference.
+        // Fix: Use a type guard with .filter to ensure `uniqueYears` is correctly typed as `string[]`, which resolves all subsequent type errors.
+        const uniqueYears = [...new Set(periods.map((p: FinancialPeriod) => getYear(p.period_label)).filter((y): y is string => y !== null))].sort();
+        const annualPeriodsForTable = uniqueYears.map((year: string) => ({ id: year, period_label: year, display_order: parseInt(year), period_type: 'annual' as 'annual', created_at: '' }));
         const aggregatedValues: Record<string, Record<string, number>> = {}; // { [metric/sub_id]: { [year]: value } }
 
-        metrics.forEach(metric => {
+        // FIX: Add explicit types to iterator variables to prevent incorrect type inference.
+        metrics.forEach((metric: FinancialMetric) => {
             aggregatedValues[metric.id] = {};
-            metric.financial_subsegments.forEach(sub => {
+            metric.financial_subsegments.forEach((sub: FinancialSubsegment) => {
                 aggregatedValues[sub.id] = {};
             });
-            uniqueYears.forEach(year => {
+            uniqueYears.forEach((year: string) => {
                 let metricTotalForYear = 0;
                 const hasSubsegments = metric.financial_subsegments.length > 0;
-                metric.financial_subsegments.forEach(sub => {
+                metric.financial_subsegments.forEach((sub: FinancialSubsegment) => {
                     let subTotalForYear = 0;
-                    periods.forEach(period => {
+                    periods.forEach((period: FinancialPeriod) => {
                         if (getYear(period.period_label) === year) {
                             const val = sub.financial_values.find(v => v.period_id === period.id)?.value || 0;
                             subTotalForYear += val;
@@ -456,7 +517,7 @@ const FinancialsPage: React.FC = () => {
                     metricTotalForYear += subTotalForYear;
                 });
                 if (!hasSubsegments) {
-                    periods.forEach(period => {
+                    periods.forEach((period: FinancialPeriod) => {
                         if (getYear(period.period_label) === year) {
                             const val = metric.financial_values.find(v => v.period_id === period.id && !v.subsegment_id)?.value || 0;
                             metricTotalForYear += val;
@@ -467,11 +528,12 @@ const FinancialsPage: React.FC = () => {
             });
         });
 
-        const annualDataForChart = uniqueYears.map(year => {
+        // FIX: Add explicit types to iterator variables to prevent incorrect type inference.
+        const annualDataForChart = uniqueYears.map((year: string) => {
             const entry: Record<string, string | number> = { period_label: year };
-            metrics.forEach(m => {
+            metrics.forEach((m: FinancialMetric) => {
                 if (m.financial_subsegments.length > 0) {
-                    m.financial_subsegments.forEach(s => {
+                    m.financial_subsegments.forEach((s: FinancialSubsegment) => {
                         entry[`subsegment-${s.id}`] = aggregatedValues[s.id]?.[year] ?? 0;
                     });
                 } else {
@@ -529,7 +591,7 @@ const FinancialsPage: React.FC = () => {
                 </div>
                 <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-x-4 gap-y-2 mb-4">{metrics.map(m => (<div key={m.id}><label className="flex items-center space-x-2 cursor-pointer font-bold"><input type="checkbox" checked={!!selectedChartItems[`metric-${m.id}`]} onChange={() => setSelectedChartItems(p => ({...p, [`metric-${m.id}`]: !p[`metric-${m.id}`]}))} className="form-checkbox h-5 w-5 rounded bg-accent border-gray-600 text-primary focus:ring-primary"/><span className="truncate">{m.metric_name}</span></label></div>))}</div>
                 <div style={{ width: '100%', height: 400 }}>
-                    <ResponsiveContainer>{(chartDataSource.length > 0 && metrics.length > 0) ? <ComposedChart data={chartDataSource} margin={{ top: 5, right: 20, left: 0, bottom: 5 }}><CartesianGrid strokeDasharray="3 3" stroke="#374151" /><XAxis dataKey="period_label" stroke="#d1d5db" /><YAxis stroke="#d1d5db" tickFormatter={valueFormatter} /><Tooltip contentStyle={{ backgroundColor: '#1f2937', border: '1px solid #374151' }} formatter={valueFormatter} /><Legend />{metrics.filter(m => selectedChartItems[`metric-${m.id}`]).map((m, i) => (chartType === 'bar' ? (m.financial_subsegments.length > 0 ? m.financial_subsegments.map((s, j) => <Bar key={s.id} dataKey={`subsegment-${s.id}`} name={s.subsegment_name} stackId={m.id} fill={COLORS[(i*3 + j) % COLORS.length]} />) : <Bar key={m.id} dataKey={`metric-${m.id}`} name={m.metric_name} fill={COLORS[i % COLORS.length]} />) : (m.financial_subsegments.length > 0 ? m.financial_subsegments.map((s, j) => <Line key={s.id} type="monotone" dataKey={`subsegment-${s.id}`} name={s.subsegment_name} stroke={COLORS[(i*3 + j) % COLORS.length]} />) : <Line key={m.id} type="monotone" dataKey={`metric-${m.id}`} name={m.metric_name} stroke={COLORS[i % COLORS.length]} />)))}</ComposedChart> : <div className="flex items-center justify-center h-full text-text-secondary">Add data and select metrics to see the chart.</div>}</ResponsiveContainer>
+                    <ResponsiveContainer>{(chartDataSource.length > 0 && metrics.length > 0) ? <ComposedChart data={chartDataSource} margin={{ top: 5, right: 20, left: 0, bottom: 5 }}><CartesianGrid strokeDasharray="3 3" stroke="#374151" /><XAxis dataKey="period_label" stroke="#d1d5db" /><YAxis stroke="#d1d5db" tickFormatter={valueFormatter} /><Tooltip contentStyle={{ backgroundColor: '#1f2937', border: '1px solid #374151' }} formatter={(value) => valueFormatter(value)} /><Legend />{metrics.filter(m => selectedChartItems[`metric-${m.id}`]).map((m, i) => (chartType === 'bar' ? (m.financial_subsegments.length > 0 ? m.financial_subsegments.map((s, j) => <Bar key={s.id} dataKey={`subsegment-${s.id}`} name={s.subsegment_name} stackId={m.id} fill={COLORS[(i*3 + j) % COLORS.length]} />) : <Bar key={m.id} dataKey={`metric-${m.id}`} name={m.metric_name} fill={COLORS[i % COLORS.length]} />) : (m.financial_subsegments.length > 0 ? m.financial_subsegments.map((s, j) => <Line key={s.id} type="monotone" dataKey={`subsegment-${s.id}`} name={s.subsegment_name} stroke={COLORS[(i*3 + j) % COLORS.length]} />) : <Line key={m.id} type="monotone" dataKey={`metric-${m.id}`} name={m.metric_name} stroke={COLORS[i % COLORS.length]} />)))}</ComposedChart> : <div className="flex items-center justify-center h-full text-text-secondary">Add data and select metrics to see the chart.</div>}</ResponsiveContainer>
                 </div>
                 <ChartSummary annualData={annualChartData} metrics={metrics} selectedChartItems={selectedChartItems} />
             </Card>
