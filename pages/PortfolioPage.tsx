@@ -1,9 +1,8 @@
-
 import React from 'react';
 import Card from '../components/ui/Card';
 import Button from '../components/ui/Button';
 import Sparkline from '../components/charts/Sparkline';
-import { PieChart, Pie, Cell, ResponsiveContainer, Legend, Tooltip, LineChart, Line, XAxis, YAxis, CartesianGrid } from 'recharts';
+import { PieChart, Pie, Cell, ResponsiveContainer, Legend, Tooltip, LineChart, Line, XAxis, YAxis, CartesianGrid, LabelList } from 'recharts';
 
 // Mock data
 const holdings = [
@@ -57,7 +56,9 @@ const PortfolioPage: React.FC = () => {
                           <XAxis dataKey="name" stroke="#d1d5db" />
                           <YAxis stroke="#d1d5db" tickFormatter={(value) => `$${(value/1000)}k`}/>
                           <Tooltip />
-                          <Line type="monotone" dataKey="value" stroke="#06b6d4" strokeWidth={2} dot={{ r: 4 }} />
+                          <Line type="monotone" dataKey="value" stroke="#06b6d4" strokeWidth={2} dot={{ r: 4 }} >
+                            <LabelList dataKey="value" position="top" formatter={(value: number) => `$${(value / 1000).toFixed(0)}k`} style={{ fill: '#d1d5db', fontSize: 12 }} />
+                          </Line>
                       </LineChart>
                   </ResponsiveContainer>
               </div>

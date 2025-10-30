@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import { useParams, Link } from 'react-router-dom';
 import { supabase } from '../services/supabaseClient';
 import { WatchlistItem, FinancialMetric, FinancialSubsegment, FinancialValue, FinancialPeriod } from '../types';
-import { ComposedChart, Bar, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
+import { ComposedChart, Bar, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, LabelList } from 'recharts';
 import { debounce } from 'lodash';
 import Card from '../components/ui/Card';
 import Button from '../components/ui/Button';
@@ -613,11 +613,33 @@ const FinancialsPage: React.FC = () => {
             getAnnualValue: getAnnualValueHelper,
         };
     }, [metrics, periods]);
+
+    const chartDataSource = activeTab === 'quarterly' ? quarterlyChartData : annualChartData;
+
+    const renderStackTotalLabel = (props: any, metric: FinancialMetric) => {
+        const { x, y, width, height, index } = props;
+        if (height < 10) return null; // Don't render for tiny bars
+
+        const dataPoint = chartDataSource[index];
+        if (!dataPoint) return null;
+
+        const total = metric.financial_subsegments.reduce((acc, sub) => {
+            const value = dataPoint[`subsegment-${sub.id}`];
+            return acc + (typeof value === 'number' ? value : 0);
+        }, 0);
+
+        if (total === 0) return null;
+
+        return (
+            <text x={x + width / 2} y={y - 6} fill="#d1d5db" textAnchor="middle" dominantBaseline="middle" fontSize={12}>
+                {valueFormatter(total)}
+            </text>
+        );
+    };
     
     if (loading) return <div className="p-8 text-center text-text-secondary">Loading Financials...</div>;
     if (error && !stock) return <div className="p-8 text-center text-danger bg-danger/10 rounded-lg">{error}</div>;
 
-    const chartDataSource = activeTab === 'quarterly' ? quarterlyChartData : annualChartData;
     const tablePeriods = activeTab === 'quarterly' ? periods : annualPeriods;
     
     return (
@@ -649,7 +671,7 @@ const FinancialsPage: React.FC = () => {
                 </div>
                 <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-x-4 gap-y-2 mb-4">{metrics.map(m => (<div key={m.id}><label className="flex items-center space-x-2 cursor-pointer font-bold"><input type="checkbox" checked={!!selectedChartItems[`metric-${m.id}`]} onChange={() => setSelectedChartItems(p => ({...p, [`metric-${m.id}`]: !p[`metric-${m.id}`]}))} className="form-checkbox h-5 w-5 rounded bg-accent border-gray-600 text-primary focus:ring-primary"/><span className="truncate">{m.metric_name}</span></label></div>))}</div>
                 <div style={{ width: '100%', height: 400 }}>
-                    <ResponsiveContainer>{(chartDataSource.length > 0 && metrics.length > 0) ? <ComposedChart data={chartDataSource} margin={{ top: 5, right: 20, left: 0, bottom: 5 }}><CartesianGrid strokeDasharray="3 3" stroke="#374151" /><XAxis dataKey="period_label" stroke="#d1d5db" /><YAxis stroke="#d1d5db" tickFormatter={valueFormatter} /><Tooltip contentStyle={{ backgroundColor: '#1f2937', border: '1px solid #374151' }} formatter={(value) => valueFormatter(value)} /><Legend />{metrics.filter(m => selectedChartItems[`metric-${m.id}`]).map((m, i) => (chartType === 'bar' ? (m.financial_subsegments.length > 0 ? m.financial_subsegments.map((s, j) => <Bar key={s.id} dataKey={`subsegment-${s.id}`} name={s.subsegment_name} stackId={m.id} fill={COLORS[(i*3 + j) % COLORS.length]} />) : <Bar key={m.id} dataKey={`metric-${m.id}`} name={m.metric_name} fill={COLORS[i % COLORS.length]} />) : (m.financial_subsegments.length > 0 ? m.financial_subsegments.map((s, j) => <Line key={s.id} type="monotone" dataKey={`subsegment-${s.id}`} name={s.subsegment_name} stroke={COLORS[(i*3 + j) % COLORS.length]} />) : <Line key={m.id} type="monotone" dataKey={`metric-${m.id}`} name={m.metric_name} stroke={COLORS[i % COLORS.length]} />)))}</ComposedChart> : <div className="flex items-center justify-center h-full text-text-secondary">Add data and select metrics to see the chart.</div>}</ResponsiveContainer>
+                    <ResponsiveContainer>{(chartDataSource.length > 0 && metrics.length > 0) ? <ComposedChart data={chartDataSource} margin={{ top: 20, right: 20, left: 0, bottom: 5 }}><CartesianGrid strokeDasharray="3 3" stroke="#374151" /><XAxis dataKey="period_label" stroke="#d1d5db" /><YAxis stroke="#d1d5db" tickFormatter={valueFormatter} /><Tooltip contentStyle={{ backgroundColor: '#1f2937', border: '1px solid #374151' }} formatter={(value) => valueFormatter(value)} /><Legend />{metrics.filter(m => selectedChartItems[`metric-${m.id}`]).map((m, i) => (chartType === 'bar' ? (m.financial_subsegments.length > 0 ? (m.financial_subsegments.map((s, j) => <Bar key={s.id} dataKey={`subsegment-${s.id}`} name={s.subsegment_name} stackId={m.id} fill={COLORS[(i*3 + j) % COLORS.length]}>{j === m.financial_subsegments.length - 1 && (<LabelList content={(props: any) => renderStackTotalLabel(props, m)} />)}</Bar>)) : <Bar key={m.id} dataKey={`metric-${m.id}`} name={m.metric_name} fill={COLORS[i % COLORS.length]}><LabelList dataKey={`metric-${m.id}`} position="top" formatter={valueFormatter} style={{ fill: '#d1d5db', fontSize: 12 }} /></Bar>) : (m.financial_subsegments.length > 0 ? m.financial_subsegments.map((s, j) => <Line key={s.id} type="monotone" dataKey={`subsegment-${s.id}`} name={s.subsegment_name} stroke={COLORS[(i*3 + j) % COLORS.length]} ><LabelList dataKey={`subsegment-${s.id}`} position="top" formatter={valueFormatter} style={{ fill: '#d1d5db', fontSize: 12 }} offset={5} /></Line>) : <Line key={m.id} type="monotone" dataKey={`metric-${m.id}`} name={m.metric_name} stroke={COLORS[i % COLORS.length]} ><LabelList dataKey={`metric-${m.id}`} position="top" formatter={valueFormatter} style={{ fill: '#d1d5db', fontSize: 12 }} offset={5} /></Line>)))}</ComposedChart> : <div className="flex items-center justify-center h-full text-text-secondary">Add data and select metrics to see the chart.</div>}</ResponsiveContainer>
                 </div>
                 <ChartSummary annualData={annualChartData} metrics={metrics} selectedChartItems={selectedChartItems} />
             </Card>

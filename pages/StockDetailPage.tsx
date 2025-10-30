@@ -3,10 +3,25 @@ import { useParams } from 'react-router-dom';
 import Card from '../components/ui/Card';
 import stockService from '../services/stockService';
 import { StockQuote, StockFundamentals, Dividend } from '../types';
-import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
+import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, LabelList } from 'recharts';
 import { formatErrorMessage } from '../utils/errorHandler';
 
 type Tab = 'Overview' | 'Fundamentals' | 'Dividends' | 'News';
+
+// Use a more robust formatter for large currency values.
+const formatValueCompact = (value: number) => {
+    if (value === null || value === undefined) return '';
+    // The source data is in millions, so multiply by 1M for correct formatting.
+    const fullValue = value * 1_000_000;
+    return new Intl.NumberFormat('en-US', {
+        notation: 'compact',
+        compactDisplay: 'short',
+        style: 'currency',
+        currency: 'USD',
+        minimumFractionDigits: 0,
+        maximumFractionDigits: 1
+    }).format(fullValue);
+};
 
 const StockDetailPage: React.FC = () => {
   const { symbol } = useParams<{ symbol: string }>();
@@ -127,12 +142,16 @@ const FundamentalsTab: React.FC<{ fundamentals: StockFundamentals[] }> = ({ fund
                 <BarChart data={fundamentals.slice().reverse()}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
                     <XAxis dataKey="fiscal_year" stroke="#d1d5db"/>
-                    <YAxis yAxisId="left" orientation="left" stroke="#06b6d4" tickFormatter={(v) => `$${v/1_000_000}M`} />
-                    <YAxis yAxisId="right" orientation="right" stroke="#82ca9d" tickFormatter={(v) => `$${v/1_000_000}M`}/>
+                    <YAxis yAxisId="left" orientation="left" stroke="#06b6d4" tickFormatter={formatValueCompact} />
+                    <YAxis yAxisId="right" orientation="right" stroke="#82ca9d" tickFormatter={formatValueCompact}/>
                     <Tooltip formatter={(value, name) => [`$${Number(value).toLocaleString()}M`, name]}/>
                     <Legend />
-                    <Bar yAxisId="left" dataKey="revenue" fill="#06b6d4" name="Revenue" />
-                    <Bar yAxisId="right" dataKey="net_income" fill="#82ca9d" name="Net Income" />
+                    <Bar yAxisId="left" dataKey="revenue" fill="#06b6d4" name="Revenue">
+                        <LabelList dataKey="revenue" position="top" formatter={formatValueCompact} style={{ fill: '#d1d5db', fontSize: 12 }} />
+                    </Bar>
+                    <Bar yAxisId="right" dataKey="net_income" fill="#82ca9d" name="Net Income">
+                        <LabelList dataKey="net_income" position="top" formatter={formatValueCompact} style={{ fill: '#d1d5db', fontSize: 12 }} />
+                    </Bar>
                 </BarChart>
             </ResponsiveContainer>
         </div>
