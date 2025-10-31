@@ -14,7 +14,7 @@ const Toast: React.FC<ToastProps> = ({ status, message }) => {
             case 'saving':
                 return { icon: <RefreshCw className="w-5 h-5 mr-2 animate-spin" />, text: 'Saving...', classes: 'bg-accent text-text-secondary', visible: true };
             case 'saved':
-                return { icon: <CheckCircle className="w-5 h-5 mr-2" />, text: 'Saved ✓', classes: 'bg-success text-white', visible: true };
+                return { icon: <CheckCircle className="w-5 h-5 mr-2" />, text: message || 'Saved ✓', classes: 'bg-success text-white', visible: true };
             case 'error':
                 return { icon: <AlertTriangle className="w-5 h-5 mr-2" />, text: message || 'Save failed', classes: 'bg-danger text-white', visible: true };
             default:

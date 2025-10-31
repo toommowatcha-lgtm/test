@@ -7,7 +7,7 @@ import { debounce } from 'lodash';
 import Card from '../components/ui/Card';
 import Button from '../components/ui/Button';
 import Toast, { SaveStatus } from '../components/ui/Toast';
-import { ArrowLeft, Plus, Trash2, LineChart as LineChartIcon, BarChart as BarChartIcon } from 'lucide-react';
+import { ArrowLeft, Plus, Trash2, LineChart as LineChartIcon, BarChart as BarChartIcon, Loader2 } from 'lucide-react';
 import { formatErrorMessage } from '../utils/errorHandler';
 
 const COLORS = ['#06b6d4', '#22c55e', '#f97316', '#8b5cf6', '#ec4899', '#fde047', '#a855f7', '#64748b'];
@@ -82,20 +82,24 @@ const ChartSummary: React.FC<{ annualData: Record<string, string | number>[], me
     );
 };
 
-const EditableHeader: React.FC<{ id: string; initialValue: string; onUpdate: (id: string, newValue: string) => void; startInEditMode?: boolean; onEditEnd?: () => void; onDelete?: (id: string) => void; isMetric?: boolean; }> = ({ id, initialValue, onUpdate, startInEditMode = false, onEditEnd, onDelete, isMetric = false }) => {
+const EditableHeader: React.FC<{ id: string; initialValue: string; onUpdate: (id: string, newValue: string) => void; startInEditMode?: boolean; onEditEnd?: () => void; onDelete?: (id: string) => void; isMetric?: boolean; forceEditMode?: boolean; isSaving?: boolean; }> = ({ id, initialValue, onUpdate, startInEditMode = false, onEditEnd, onDelete, isMetric = false, forceEditMode = false, isSaving = false }) => {
     const [isEditing, setIsEditing] = useState(startInEditMode);
     const [value, setValue] = useState(initialValue);
     const inputRef = useRef<HTMLInputElement>(null);
 
+    const effectiveIsEditing = forceEditMode || isEditing;
+
     useEffect(() => {
-        if (isEditing && inputRef.current) {
+        if (effectiveIsEditing && inputRef.current) {
             inputRef.current.focus();
             inputRef.current.select();
         }
-    }, [isEditing]);
+    }, [effectiveIsEditing, startInEditMode]);
 
     const handleBlur = () => {
-        setIsEditing(false);
+        if (!forceEditMode) {
+            setIsEditing(false);
+        }
         onEditEnd?.();
         if (value.trim() && value !== initialValue) {
             onUpdate(id, value.trim());
@@ -104,14 +108,14 @@ const EditableHeader: React.FC<{ id: string; initialValue: string; onUpdate: (id
         }
     };
     
-    if (isEditing) {
+    if (effectiveIsEditing) {
         return <input ref={inputRef} type="text" value={value} onChange={e => setValue(e.target.value)} onBlur={handleBlur} onKeyDown={e => e.key === 'Enter' && handleBlur()} className={`w-full p-1 rounded focus:outline-none focus:ring-2 focus:ring-primary ${isMetric ? 'bg-transparent' : 'bg-accent text-center'}`} />;
     }
 
     return (
         <div className={`group relative p-1 rounded cursor-pointer min-h-[34px] flex items-center ${isMetric ? '' : 'justify-center hover:bg-accent'}`} onClick={() => setIsEditing(true)}>
             {value}
-            {onDelete && <button onClick={(e) => { e.stopPropagation(); onDelete(id); }} className={`absolute p-1 bg-danger rounded-full text-white opacity-0 group-hover:opacity-100 transition-opacity ${isMetric ? 'top-1 -left-7' : '-top-2 -right-2'}`}><Trash2 className="w-3 h-3"/></button>}
+            {onDelete && <button onClick={(e) => { e.stopPropagation(); onDelete(id); }} disabled={isSaving} className={`absolute p-1 bg-danger rounded-full text-white transition-opacity disabled:opacity-50 disabled:cursor-not-allowed ${forceEditMode ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'} ${isMetric ? 'top-1/2 -translate-y-1/2 right-2' : '-top-2 -right-2'}`}>{isSaving ? <Loader2 className="w-3 h-3 animate-spin"/> : <Trash2 className="w-3 h-3"/>}</button>}
         </div>
     );
 };
@@ -131,37 +135,50 @@ const FinancialsPage: React.FC = () => {
     const [periods, setPeriods] = useState<FinancialPeriod[]>([]);
     const [loading, setLoading] = useState(true);
     const [saveStatus, setSaveStatus] = useState<SaveStatus>('idle');
+    const [toastText, setToastText] = useState<string | undefined>();
     const [error, setError] = useState<string | null>(null);
     const [selectedChartItems, setSelectedChartItems] = useState<Record<string, boolean>>({});
     const [chartType, setChartType] = useState<'line' | 'bar'>('bar');
     const [newlyAddedId, setNewlyAddedId] = useState<string | null>(null);
     const [activeTab, setActiveTab] = useState<'quarterly' | 'annual'>('quarterly');
+    const [isEditMode, setIsEditMode] = useState(false);
+    const [selectedMetricIds, setSelectedMetricIds] = useState<string[]>([]);
+    
+    const tableCardRef = useRef<HTMLDivElement>(null);
+    const editModeButtonRef = useRef<HTMLButtonElement>(null);
+    const floatingPanelRef = useRef<HTMLDivElement>(null);
 
-    // State for swipe-to-delete
-    const [swipedMetricId, setSwipedMetricId] = useState<string | null>(null);
-    const swipeStartRef = useRef<{ x: number; y: number; time: number } | null>(null);
-    const swipedRowRef = useRef<HTMLTableCellElement | null>(null);
-
-    // Effect to handle clicks outside of a swiped row to close it
     useEffect(() => {
-        if (!swipedMetricId) return;
+        if (!isEditMode) {
+            setSelectedMetricIds([]);
+        }
+    }, [isEditMode]);
 
+    // Effect to handle clicks outside of the table card to exit edit mode
+    useEffect(() => {
+        if (!isEditMode) return;
         const handleClickOutside = (event: MouseEvent) => {
-            if (swipedRowRef.current && !swipedRowRef.current.contains(event.target as Node)) {
-                setSwipedMetricId(null);
+            if (
+                tableCardRef.current && !tableCardRef.current.contains(event.target as Node) &&
+                editModeButtonRef.current && !editModeButtonRef.current.contains(event.target as Node) &&
+                floatingPanelRef.current && !floatingPanelRef.current.contains(event.target as Node)
+            ) {
+                setIsEditMode(false);
             }
         };
-        
         document.addEventListener('mousedown', handleClickOutside);
         return () => {
             document.removeEventListener('mousedown', handleClickOutside);
         };
-    }, [swipedMetricId]);
+    }, [isEditMode]);
 
-    const showSaveStatus = useCallback((status: SaveStatus, customError?: string) => {
+    const showToast = useCallback((status: SaveStatus, text?: string) => {
+        setToastText(text);
         setSaveStatus(status);
-        if (customError) setError(customError);
-        setTimeout(() => setSaveStatus('idle'), status === 'saved' ? 2000 : 5000);
+        setTimeout(() => {
+            setSaveStatus('idle');
+            setToastText(undefined);
+        }, status === 'saved' ? 2000 : 5000);
     }, []);
 
     const fetchData = useCallback(async () => {
@@ -259,11 +276,11 @@ const FinancialsPage: React.FC = () => {
                     }
                 }
             }
-            showSaveStatus('saved');
+            showToast('saved', 'Changes saved');
         } catch (err) {
-            showSaveStatus('error', formatErrorMessage('Save failed', err));
+            showToast('error', formatErrorMessage('Save failed', err));
         }
-    }, 1500), [stockId, showSaveStatus]);
+    }, 1500), [stockId, showToast]);
 
     const handleValueChange = (metric_id: string, subsegment_id: string | null, period_id: string, valueStr: string) => {
         const value = valueStr === '' ? null : parseFloat(valueStr);
@@ -335,7 +352,7 @@ const FinancialsPage: React.FC = () => {
         
         const isDuplicate = type === 'period' && periods.some(p => p.id !== id && p.period_label === newName);
         if (isDuplicate) {
-            showSaveStatus('error', `Period "${newName}" already exists.`);
+            showToast('error', `Period "${newName}" already exists.`);
             const oldName = periods.find(p => p.id === id)?.period_label;
             if(oldName) setPeriods(prev => prev.map(p => p.id === id ? {...p, period_label: oldName} : p));
             return;
@@ -344,10 +361,10 @@ const FinancialsPage: React.FC = () => {
         setSaveStatus('saving');
         const { error } = await supabase.from(table).update({ [nameField]: newName }).match({ id });
         if (error) {
-            showSaveStatus('error', formatErrorMessage(`Failed to update ${type}`, error));
+            showToast('error', formatErrorMessage(`Failed to update ${type}`, error));
             fetchData();
         } else { 
-            showSaveStatus('saved'); 
+            showToast('saved', `${type.charAt(0).toUpperCase() + type.slice(1)} updated`); 
             if (type === 'metric') {
                 setMetrics(prev => prev.map(m => m.id === id ? { ...m, metric_name: newName } : m));
             } else if (type === 'sub') {
@@ -363,13 +380,13 @@ const FinancialsPage: React.FC = () => {
 
     const addMetric = async () => {
         if (!stockId) return;
-        showSaveStatus('saving');
+        setSaveStatus('saving');
         const { data, error } = await supabase.from('financial_metric').insert({ stock_id: stockId, metric_name: 'New Metric', display_order: metrics.length }).select().single();
-        if (error) { showSaveStatus('error', formatErrorMessage('Failed to add metric', error)); return; }
-        if (!data) { showSaveStatus('error', 'Failed to add metric: No data returned from server.'); return; }
+        if (error) { showToast('error', formatErrorMessage('Failed to add metric', error)); return; }
+        if (!data) { showToast('error', 'Failed to add metric: No data returned from server.'); return; }
         const newMetric: FinancialMetric = { ...data, financial_subsegments: [], financial_values: [] };
         setMetrics(prev => [...prev, newMetric]);
-        showSaveStatus('saved');
+        showToast('saved', 'Metric added successfully');
     };
 
     const addSubsegment = async (metric_id: string) => {
@@ -377,7 +394,7 @@ const FinancialsPage: React.FC = () => {
         const parentMetric = metrics.find(m => m.id === metric_id);
         if (!parentMetric) return;
     
-        showSaveStatus('saving');
+        setSaveStatus('saving');
         try {
             const isFirstSubsegment = parentMetric.financial_subsegments.length === 0;
     
@@ -415,9 +432,9 @@ const FinancialsPage: React.FC = () => {
                 }
                 return m;
             }));
-            showSaveStatus('saved');
+            showToast('saved', 'Sub-segment added successfully');
         } catch (err) {
-            showSaveStatus('error', formatErrorMessage('Failed to add sub-segment', err));
+            showToast('error', formatErrorMessage('Failed to add sub-segment', err));
             await fetchData(); // Refetch to ensure consistency on error
         }
     };
@@ -425,45 +442,37 @@ const FinancialsPage: React.FC = () => {
     const addPeriod = async () => {
         if (!stockId) return;
         const newLabel = `Q${(periods.length % 4) + 1} ${new Date().getFullYear() + Math.floor(periods.length / 4)}`;
-        showSaveStatus('saving');
+        setSaveStatus('saving');
         const { data, error } = await supabase.from('financial_period').insert({ stock_id: stockId, period_label: newLabel, period_type: 'quarter', display_order: periods.length }).select().single();
-        if (error) { showSaveStatus('error', formatErrorMessage('Failed to add period', error)); return; }
-        if (!data) { showSaveStatus('error', 'Failed to add period: No data returned from server.'); return; }
+        if (error) { showToast('error', formatErrorMessage('Failed to add period', error)); return; }
+        if (!data) { showToast('error', 'Failed to add period: No data returned from server.'); return; }
         setPeriods(prev => [...prev, data]);
         setNewlyAddedId(data.id);
-        showSaveStatus('saved');
+        showToast('saved', 'Period added successfully');
     };
     
     const deleteItem = async (type: 'metric' | 'sub' | 'period', id: string) => {
-        if (!confirm(`Are you sure you want to delete this ${type}? This cannot be undone.`)) return;
-
+        alert(`✅ Remove button clicked for ${type}!`);
+        console.log(`Remove button triggered for ${type}: ${id}`);
+        if (!window.confirm(`Are you sure you want to delete this ${type}? This cannot be undone.`)) return;
+    
         setSaveStatus('saving');
         try {
             if (type === 'metric') {
-                // Delete all values for this metric (with or without subsegments)
-                const { error: valueError } = await supabase.from('financial_values').delete().eq('metric_id', id);
-                if (valueError) throw valueError;
-
-                // Delete all subsegments for this metric
-                const { error: subError } = await supabase.from('financial_subsegment').delete().eq('metric_id', id);
-                if (subError) throw subError;
-
-                // Finally, delete the metric itself
-                const { error: metricError } = await supabase.from('financial_metric').delete().eq('id', id);
-                if (metricError) throw metricError;
-
+                // This simplified logic directly attempts to delete the metric.
+                // If it fails due to a foreign key constraint (i.e., it has linked data),
+                // the catch block below will handle the specific error message as requested.
+                const { error } = await supabase.from('financial_metric').delete().eq('id', id);
+                if (error) throw error;
+    
                 setMetrics(prev => prev.filter(m => m.id !== id));
-                setSwipedMetricId(null); // Close the swipe UI
             } else if (type === 'sub') {
-                // First, delete values associated with the subsegment
                 const { error: valueError } = await supabase.from('financial_values').delete().eq('subsegment_id', id);
                 if (valueError) throw valueError;
                 
-                // Then, delete the subsegment record itself
                 const { error: subDeleteError } = await supabase.from('financial_subsegment').delete().match({ id });
                 if (subDeleteError) throw subDeleteError;
                 
-                // Refetch data to ensure parent totals are recalculated and state is consistent
                 await fetchData();
             } else if (type === 'period') {
                 const { error } = await supabase.from('financial_period').delete().match({ id });
@@ -479,53 +488,63 @@ const FinancialsPage: React.FC = () => {
                     }))
                 })));
             }
-            showSaveStatus('saved');
-        } catch (err) {
-            showSaveStatus('error', formatErrorMessage(`Failed to delete ${type}`, err));
+            showToast('saved', `${type.charAt(0).toUpperCase() + type.slice(1)} deleted successfully`);
+        } catch (err: any) {
+            let userMessage = formatErrorMessage(`Failed to delete ${type}`, err);
+            if (err.message && err.message.includes('foreign key constraint')) {
+                userMessage = `Cannot delete this ${type} because it has linked financial data.`;
+            }
+            showToast('error', userMessage);
         }
     };
     
-    // Swipe-to-delete handlers
-    const handleSwipeStart = (
-        e: React.TouchEvent<HTMLDivElement> | React.MouseEvent<HTMLDivElement>,
-        metricId: string
-    ) => {
-        if ('button' in e && e.button !== 0) return; // Only handle left-clicks
-        if (swipedMetricId && swipedMetricId !== metricId) {
-            setSwipedMetricId(null);
-        }
-        const point = 'touches' in e ? e.touches[0] : e;
-        swipeStartRef.current = { x: point.clientX, y: point.clientY, time: Date.now() };
+    const handleToggleMetricSelection = (metricId: string) => {
+        setSelectedMetricIds(prev =>
+            prev.includes(metricId)
+                ? prev.filter(id => id !== metricId)
+                : [...prev, metricId]
+        );
     };
 
-    const handleSwipeEnd = (
-        e: React.TouchEvent<HTMLDivElement> | React.MouseEvent<HTMLDivElement>,
-        metricId: string
-    ) => {
-        if (!swipeStartRef.current) return;
-        const point = 'changedTouches' in e ? e.changedTouches[0] : e;
-        const { x: startX, y: startY, time } = swipeStartRef.current;
+    const handleDeleteSelectedMetrics = async () => {
+        alert("✅ Remove button clicked!");
+        console.log("Remove button triggered successfully");
 
-        const duration = Date.now() - time;
-        if (duration < 300 && Math.abs(point.clientX - startX) < 10 && Math.abs(point.clientY - startY) < 10) {
-            swipeStartRef.current = null;
-            return; // It's a click, let the EditableHeader handle it.
-        }
+        if (selectedMetricIds.length === 0) {
+            alert("No metrics selected to delete.");
+            return;
+        };
 
-        const deltaX = startX - point.clientX;
-        const deltaY = Math.abs(startY - point.clientY);
-
-        if (Math.abs(deltaX) > deltaY + 10) { // Horizontal swipe
-            if (deltaX > 50) { // Swipe left to open
-                setSwipedMetricId(metricId);
-            } else if (deltaX < -50) { // Swipe right to close
-                setSwipedMetricId(null);
-            }
-        }
+        const confirmed = window.confirm(`Are you sure you want to delete ${selectedMetricIds.length} metric(s)? This cannot be undone.`);
+        if (!confirmed) return;
         
-        swipeStartRef.current = null;
-    };
+        setSaveStatus('saving');
+        try {
+            const { error } = await supabase
+                .from('financial_metric')
+                .delete()
+                .in('id', selectedMetricIds);
+            
+            if (error) throw error;
+            
+            const newSelectedChartItems = { ...selectedChartItems };
+            selectedMetricIds.forEach(id => {
+                delete newSelectedChartItems[`metric-${id}`];
+            });
+            setSelectedChartItems(newSelectedChartItems);
 
+            setMetrics(prev => prev.filter(m => !selectedMetricIds.includes(m.id)));
+            setSelectedMetricIds([]);
+            showToast('saved', 'Deleted successfully.');
+
+        } catch (err: any) {
+            let userMessage = formatErrorMessage('Failed to delete metrics', err);
+            if (err.message && err.message.includes('foreign key constraint')) {
+                userMessage = "One or more selected metrics could not be deleted because they have associated financial data.";
+            }
+            showToast('error', userMessage);
+        }
+    };
 
     const {
         quarterlyChartData,
@@ -644,6 +663,24 @@ const FinancialsPage: React.FC = () => {
     
     return (
         <div className="container mx-auto p-4 md:p-8">
+            <div
+                ref={floatingPanelRef}
+                className={`fixed top-24 right-8 z-50 bg-content rounded-lg shadow-lg p-3 flex items-center gap-4 transition-all duration-300 transform-gpu ${isEditMode && selectedMetricIds.length > 0 ? 'translate-y-0 opacity-100' : '-translate-y-10 opacity-0 pointer-events-none'}`}>
+                <span className="font-semibold">{selectedMetricIds.length} selected</span>
+                <Button
+                    onMouseDown={(e) => {
+                        e.stopPropagation();
+                        handleDeleteSelectedMetrics();
+                    }}
+                    variant="danger"
+                    size="sm"
+                    disabled={saveStatus === 'saving'}
+                >
+                     {saveStatus === 'saving' ? <Loader2 className="w-4 h-4 mr-2 animate-spin"/> : <Trash2 className="w-4 h-4 mr-2" />}
+                    Delete Selected
+                </Button>
+            </div>
+
             <Link to="/" className="inline-flex items-center text-primary mb-6 hover:underline"><ArrowLeft className="w-4 h-4 mr-2" />Back to Watchlist</Link>
             
             <div className="border-b border-accent mb-8">
@@ -655,7 +692,15 @@ const FinancialsPage: React.FC = () => {
                 </nav>
             </div>
 
-            <header className="mb-8"><h1 className="text-5xl font-bold">{stock?.symbol} - Financials</h1><p className="text-xl text-text-secondary">{stock?.company}</p></header>
+            <header className="flex flex-wrap justify-between items-center mb-8 gap-4">
+                <div>
+                    <h1 className="text-5xl font-bold">{stock?.symbol} - Financials</h1>
+                    <p className="text-xl text-text-secondary">{stock?.company}</p>
+                </div>
+                 <Button ref={editModeButtonRef} onClick={() => setIsEditMode(!isEditMode)} variant={isEditMode ? 'primary' : 'secondary'}>
+                    {isEditMode ? 'Done' : 'Custom Metrics'}
+                </Button>
+            </header>
 
              <div className="border-b border-accent mb-8">
                 <nav className="-mb-px flex space-x-8" aria-label="Tabs">
@@ -676,68 +721,58 @@ const FinancialsPage: React.FC = () => {
                 <ChartSummary annualData={annualChartData} metrics={metrics} selectedChartItems={selectedChartItems} />
             </Card>
 
-            <Card>
+            <Card ref={tableCardRef} className={`transition-all duration-300 ${isEditMode ? 'border-2 border-primary shadow-lg shadow-primary/20' : ''}`}>
                 <div className="overflow-x-auto">
                     <table className="w-full min-w-[800px] text-left">
-                        <thead><tr><th className="p-3 font-semibold sticky left-0 bg-content z-20 w-52">Metric / Sub-segment</th>{tablePeriods.map(p => (<th key={p.id} className="p-1 font-semibold text-center w-32">{activeTab === 'quarterly' ? <EditableHeader id={p.id} initialValue={p.period_label} onUpdate={handleNameUpdate.bind(null, 'period')} startInEditMode={p.id === newlyAddedId} onEditEnd={() => setNewlyAddedId(null)} onDelete={deleteItem.bind(null, 'period')} /> : <div className="p-1">{p.period_label}</div>}</th>))}{activeTab === 'quarterly' && <th className="p-1 w-24"><Button onClick={addPeriod} variant="secondary" className="w-full text-xs"><Plus className="w-3 h-3 mr-1"/>Period</Button></th>}</tr></thead>
+                        <thead><tr><th className="p-3 font-semibold sticky left-0 bg-content z-20 min-w-52">Metric / Sub-segment</th>{tablePeriods.map(p => (<th key={p.id} className="p-1 font-semibold text-center w-32">{activeTab === 'quarterly' ? <EditableHeader id={p.id} initialValue={p.period_label} onUpdate={handleNameUpdate.bind(null, 'period')} startInEditMode={p.id === newlyAddedId} onEditEnd={() => setNewlyAddedId(null)} onDelete={deleteItem.bind(null, 'period')} forceEditMode={isEditMode} isSaving={saveStatus === 'saving'} /> : <div className="p-1">{p.period_label}</div>}</th>))}{activeTab === 'quarterly' && <th className="p-1 w-24">{isEditMode && <Button onClick={addPeriod} variant="secondary" className="w-full text-xs"><Plus className="w-3 h-3 mr-1"/>Period</Button>}</th>}</tr></thead>
                         <tbody>
                             {metrics.map(metric => (
                                 <React.Fragment key={metric.id}>
                                     <tr className="bg-content/50">
-                                        <td ref={swipedMetricId === metric.id ? swipedRowRef : null} className="p-0 font-bold sticky left-0 bg-content z-10 w-52">
-                                            <div className="relative w-full h-full overflow-hidden">
-                                                {/* Delete Action (Revealed on swipe) */}
-                                                <div className="absolute top-0 right-0 h-full w-20 bg-danger flex items-center justify-center text-white">
-                                                    <Button
-                                                        variant="danger"
-                                                        className="p-2 h-full w-full flex items-center justify-center rounded-none"
-                                                        onClick={() => {
-                                                            deleteItem('metric', metric.id);
-                                                            setSwipedMetricId(null);
-                                                        }}
-                                                        aria-label={`Delete metric ${metric.metric_name}`}
-                                                    >
-                                                        <Trash2 className="w-5 h-5" />
-                                                    </Button>
-                                                </div>
-                                                {/* Swipable Content */}
-                                                <div
-                                                    className={`relative w-full h-full bg-content transition-transform duration-300 ease-in-out`}
-                                                    style={{ transform: `translateX(${swipedMetricId === metric.id ? -80 : 0}px)` }}
-                                                    onTouchStart={(e) => handleSwipeStart(e, metric.id)}
-                                                    onTouchEnd={(e) => handleSwipeEnd(e, metric.id)}
-                                                    onMouseDown={(e) => handleSwipeStart(e, metric.id)}
-                                                    onMouseUp={(e) => handleSwipeEnd(e, metric.id)}
-                                                >
+                                        <td className="p-0 font-bold sticky left-0 bg-content z-10 min-w-52">
+                                            <div className="flex items-center">
+                                                {isEditMode && (
+                                                    <label className="pl-3 py-2 cursor-pointer">
+                                                        <input
+                                                            type="checkbox"
+                                                            checked={selectedMetricIds.includes(metric.id)}
+                                                            onChange={() => handleToggleMetricSelection(metric.id)}
+                                                            className="form-checkbox h-5 w-5 rounded bg-accent border-gray-600 text-primary focus:ring-primary shrink-0"
+                                                        />
+                                                    </label>
+                                                )}
+                                                <div className="flex-grow">
                                                     <EditableHeader
                                                         id={metric.id}
                                                         initialValue={metric.metric_name}
                                                         onUpdate={handleNameUpdate.bind(null, 'metric')}
-                                                        onDelete={deleteItem.bind(null, 'metric')}
+                                                        onDelete={isEditMode ? undefined : deleteItem.bind(null, 'metric')}
                                                         isMetric
+                                                        forceEditMode={isEditMode}
+                                                        isSaving={saveStatus === 'saving'}
                                                     />
                                                 </div>
                                             </div>
                                         </td>
-                                        {tablePeriods.map(p => <td key={p.id} className="p-1 w-32 text-right pr-3 font-semibold">{metric.financial_subsegments.length > 0 ? (activeTab === 'quarterly' ? valueFormatter(metric.financial_values.find(v => v.period_id === p.id)?.value ?? 0) : valueFormatter(getAnnualValue(metric.id, null, p.period_label))) : (activeTab === 'quarterly' ? <input type="number" step="any" value={metric.financial_values.find(v => v.period_id === p.id)?.value ?? ''} onChange={e => handleValueChange(metric.id, null, p.id, e.target.value)} placeholder="-" className="w-full bg-transparent p-2 text-right rounded hover:bg-accent focus:bg-accent"/> : <div className="w-full bg-transparent p-2 text-right rounded">{valueFormatter(getAnnualValue(metric.id, null, p.period_label))}</div>)}</td>)}
+                                        {tablePeriods.map(p => <td key={p.id} className="p-1 w-32 text-right pr-3 font-semibold">{metric.financial_subsegments.length > 0 ? (activeTab === 'quarterly' ? valueFormatter(metric.financial_values.find(v => v.period_id === p.id)?.value ?? 0) : valueFormatter(getAnnualValue(metric.id, null, p.period_label))) : (activeTab === 'quarterly' ? <input type="number" step="any" value={metric.financial_values.find(v => v.period_id === p.id)?.value ?? ''} onChange={e => handleValueChange(metric.id, null, p.id, e.target.value)} placeholder="-" className="w-full bg-transparent p-2 text-right rounded hover:bg-accent focus:bg-accent" disabled={!isEditMode}/> : <div className="w-full bg-transparent p-2 text-right rounded">{valueFormatter(getAnnualValue(metric.id, null, p.period_label))}</div>)}</td>)}
                                         {activeTab === 'quarterly' && <td></td>}
                                     </tr>
                                     {metric.financial_subsegments.map(sub => (
                                         <tr key={sub.id} className="hover:bg-accent/20">
-                                            <td className="p-2 pl-6 sticky left-0 bg-content z-10 w-52"><EditableHeader id={sub.id} initialValue={sub.subsegment_name} onUpdate={handleNameUpdate.bind(null, 'sub')} onDelete={deleteItem.bind(null, 'sub')} isMetric /></td>
-                                            {tablePeriods.map(p => <td key={p.id} className="p-1 w-32">{activeTab === 'quarterly' ? <input type="number" step="any" value={sub.financial_values.find(v => v.period_id === p.id)?.value ?? ''} onChange={e => handleValueChange(metric.id, sub.id, p.id, e.target.value)} placeholder="-" className="w-full bg-transparent p-2 text-right rounded hover:bg-accent focus:bg-accent"/> : <div className="w-full bg-transparent p-2 text-right rounded">{valueFormatter(getAnnualValue(metric.id, sub.id, p.period_label))}</div>}</td>)}
+                                            <td className="p-2 pl-6 sticky left-0 bg-content z-10 w-52"><EditableHeader id={sub.id} initialValue={sub.subsegment_name} onUpdate={handleNameUpdate.bind(null, 'sub')} onDelete={deleteItem.bind(null, 'sub')} isMetric forceEditMode={isEditMode} isSaving={saveStatus === 'saving'} /></td>
+                                            {tablePeriods.map(p => <td key={p.id} className="p-1 w-32">{activeTab === 'quarterly' ? <input type="number" step="any" value={sub.financial_values.find(v => v.period_id === p.id)?.value ?? ''} onChange={e => handleValueChange(metric.id, sub.id, p.id, e.target.value)} placeholder="-" className="w-full bg-transparent p-2 text-right rounded hover:bg-accent focus:bg-accent" disabled={!isEditMode}/> : <div className="w-full bg-transparent p-2 text-right rounded">{valueFormatter(getAnnualValue(metric.id, sub.id, p.period_label))}</div>}</td>)}
                                             {activeTab === 'quarterly' && <td></td>}
                                         </tr>
                                     ))}
-                                    {activeTab === 'quarterly' && <tr><td colSpan={periods.length + 2} className="py-1 pl-6"><Button onClick={() => addSubsegment(metric.id)} variant="secondary" className="text-xs px-2 py-1"><Plus className="w-3 h-3 mr-1"/>Add Subsegment</Button></td></tr>}
+                                    {isEditMode && activeTab === 'quarterly' && <tr><td colSpan={periods.length + 2} className="py-1 pl-6"><Button onClick={() => addSubsegment(metric.id)} variant="secondary" className="text-xs px-2 py-1"><Plus className="w-3 h-3 mr-1"/>Add Subsegment</Button></td></tr>}
                                 </React.Fragment>
                             ))}
                         </tbody>
                     </table>
                 </div>
-                {activeTab === 'quarterly' && <div className="mt-4"><Button onClick={addMetric} variant="secondary"><Plus className="w-4 h-4 mr-2"/>Add Metric</Button></div>}
+                {isEditMode && <div className="mt-4"><Button onClick={addMetric} variant="secondary"><Plus className="w-4 h-4 mr-2"/>Add Metric</Button></div>}
             </Card>
-            <Toast status={saveStatus} message={error ?? undefined}/>
+            <Toast status={saveStatus} message={toastText}/>
         </div>
     );
 };
