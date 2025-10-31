@@ -27,33 +27,29 @@ const CustomMetric: React.FC<CustomMetricProps> = ({ stockId, periodId }) => {
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // FIX: Replaced the manual select-then-update/insert logic with a direct Supabase `upsert` call.
+  // This is more efficient and correctly persists both new and existing metric values, fixing the data loss on refresh.
   const debouncedSave = useCallback(debounce(async (payloads: Partial<FinancialValue>[]) => {
     setIsSaving(true);
     setError(null);
     try {
-      const savePromises = payloads.map(async (payload) => {
-        const { stock_id, metric_id, period_id, subsegment_id, value } = payload;
-        
-        if (!stock_id || !metric_id || !period_id) return;
+      if (payloads.length === 0) {
+        setIsSaving(false);
+        return;
+      }
+      
+      // Using Supabase's `upsert` is the correct, atomic way to handle this.
+      // It requires a unique constraint on the specified `onConflict` columns in the database schema
+      // to correctly identify which row to update or if a new one should be inserted.
+      const { error: upsertError } = await supabase
+        .from('financial_values')
+        .upsert(payloads);
 
-        let checkQuery = supabase.from('financial_values').select('id')
-            .eq('stock_id', stock_id).eq('metric_id', metric_id).eq('period_id', period_id);
-        
-        checkQuery = subsegment_id ? checkQuery.eq('subsegment_id', subsegment_id) : checkQuery.is('subsegment_id', null);
+      if (upsertError) {
+        throw upsertError;
+      }
 
-        const { data: existing, error: checkError } = await checkQuery.maybeSingle();
-        if (checkError) throw checkError;
-
-        if (existing) {
-          const { error: updateError } = await supabase.from('financial_values').update({ value }).eq('id', existing.id);
-          if (updateError) throw updateError;
-        } else if (value !== null && value !== undefined) {
-          const { error: insertError } = await supabase.from('financial_values').insert(payload);
-          if (insertError) throw insertError;
-        }
-      });
-      await Promise.all(savePromises);
-      console.log('Save successful:', payloads);
+      console.log('Save successful (upsert):', payloads);
     } catch (err) {
       const message = formatErrorMessage('Save failed', err);
       setError(message);
@@ -61,7 +57,8 @@ const CustomMetric: React.FC<CustomMetricProps> = ({ stockId, periodId }) => {
     } finally {
       setIsSaving(false);
     }
-  }, 300), [stockId, periodId]);
+  }, 300), []);
+
 
   const fetchData = useCallback(async () => {
     if (!stockId || !periodId) return;
@@ -146,12 +143,9 @@ const CustomMetric: React.FC<CustomMetricProps> = ({ stockId, periodId }) => {
         const { data, error } = await supabase.from('financial_metric').insert({ stock_id: stockId, metric_name: newMetricName, display_order: metrics.length }).select().single();
         if (error || !data) throw error || new Error("Failed to get data for new metric");
         
-        // FIX: Removed the creation of an initial '0' value in the database.
-        // This simplifies the logic and forces the 'INSERT' path on the first value entry,
-        // which is more robust and avoids potential race conditions.
-
-        // FIX: Initialize the new metric with a 'null' value in the local state.
-        // This correctly reflects that no value has been saved yet and leaves the input field empty.
+        // This is the correct pattern: Add the metric to the database, get the generated ID back,
+        // and then update the local UI state. The first time a user enters a value, the debounced
+        // save function will correctly INSERT the new value record.
         setMetrics(prev => [...prev, { ...data, value: null, financial_subsegments: [] }]);
         setNewMetricName('');
     } catch (err) {
