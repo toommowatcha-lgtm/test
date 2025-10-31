@@ -230,10 +230,9 @@ const FinancialsPage: React.FC = () => {
     const debouncedSave = useCallback(debounce(async (payloads: Partial<FinancialValue>[]) => {
         setSaveStatus('saving');
         try {
-            // Requirement: Add console.log for debugging
-            console.log('Debounced save triggered with payloads:', payloads);
-
-            // Run save operations in parallel for performance, which is crucial for many metrics.
+            // This logic processes all pending saves in parallel. While it makes many
+            // network requests, it is robust against database schemas that may lack a
+            // composite unique key required for a bulk `upsert` operation.
             const savePromises = payloads.map(async (payload) => {
                 const { stock_id, metric_id, period_id, subsegment_id, value } = payload;
     
@@ -242,7 +241,7 @@ const FinancialsPage: React.FC = () => {
                     return; // Skip invalid payloads
                 }
     
-                // This logic correctly finds the specific row to update or determines if a new one is needed.
+                // Check if a record already exists to decide between UPDATE and INSERT.
                 let checkQuery = supabase
                     .from('financial_values')
                     .select('id')
@@ -258,7 +257,7 @@ const FinancialsPage: React.FC = () => {
     
                 const { data: existing, error: checkError } = await checkQuery.limit(1).single();
     
-                // PGRST116 code means "Not a single row was returned" which is expected when no value exists yet.
+                // 'PGRST116' means no row was found, which is expected for new values.
                 if (checkError && checkError.code !== 'PGRST116') {
                     throw new Error(`DB check failed for metric ${metric_id}: ${checkError.message}`);
                 }
@@ -270,17 +269,11 @@ const FinancialsPage: React.FC = () => {
                         .update({ value })
                         .eq('id', existing.id);
     
-                    if (updateError) {
-                        throw new Error(`Update failed for metric ${metric_id}: ${updateError.message}`);
-                    }
+                    if (updateError) throw new Error(`Update failed for metric ${metric_id}: ${updateError.message}`);
                 } else if (value !== null && value !== undefined) {
                     // Insert a new record only if a value is present.
-                    const { error: insertError } = await supabase
-                        .from('financial_values')
-                        .insert(payload);
-                    if (insertError) {
-                         throw new Error(`Insert failed for metric ${metric_id}: ${insertError.message}`);
-                    }
+                    const { error: insertError } = await supabase.from('financial_values').insert(payload);
+                    if (insertError) throw new Error(`Insert failed for metric ${metric_id}: ${insertError.message}`);
                 }
             });
 
@@ -391,12 +384,38 @@ const FinancialsPage: React.FC = () => {
     const addMetric = async () => {
         if (!stockId) return;
         setSaveStatus('saving');
-        const { data, error } = await supabase.from('financial_metric').insert({ stock_id: stockId, metric_name: 'New Metric', display_order: metrics.length }).select().single();
-        if (error) { showToast('error', formatErrorMessage('Failed to add metric', error)); return; }
-        if (!data) { showToast('error', 'Failed to add metric: No data returned from server.'); return; }
-        const newMetric: FinancialMetric = { ...data, financial_subsegments: [], financial_values: [] };
-        setMetrics(prev => [...prev, newMetric]);
-        showToast('saved', 'Metric added successfully');
+        try {
+            // Step 1: Insert the new metric definition to get an ID.
+            const { data: newMetricData, error: metricError } = await supabase
+                .from('financial_metric')
+                .insert({ stock_id: stockId, metric_name: 'New Metric', display_order: metrics.length })
+                .select()
+                .single();
+            if (metricError) throw metricError;
+            if (!newMetricData) throw new Error("Failed to get data for new metric.");
+    
+            // Step 2: Create placeholder `financial_values` records for each existing period.
+            // This is the critical fix to ensure that entering a value is always an UPDATE,
+            // which prevents data from disappearing on refresh.
+            if (periods.length > 0) {
+                const newValues = periods.map(period => ({
+                    stock_id: stockId,
+                    metric_id: newMetricData.id,
+                    period_id: period.id,
+                    value: null, // Default to null
+                }));
+                const { error: valuesError } = await supabase.from('financial_values').insert(newValues);
+                if (valuesError) throw valuesError;
+            }
+    
+            // Step 3: Eagerly update local state for a responsive UI.
+            const newMetric: FinancialMetric = { ...newMetricData, financial_subsegments: [], financial_values: [] };
+            setMetrics(prev => [...prev, newMetric]);
+            showToast('saved', 'Metric added successfully.');
+        } catch (err) {
+            showToast('error', formatErrorMessage('Failed to add metric', err));
+            await fetchData(); // Refetch data on error to ensure consistency
+        }
     };
 
     const addSubsegment = async (metric_id: string) => {
