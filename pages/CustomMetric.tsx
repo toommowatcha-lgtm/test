@@ -1,26 +1,55 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { supabase } from "./supabaseClient";
+import { debounce } from "lodash";
 
-const CustomMetric = ({ currentPeriod, currentStockId }) => {
-  const [metrics, setMetrics] = useState<any[]>([]);
+interface Metric {
+  id: string;
+  metric_name: string;
+  value: number;
+  subsegments?: Subsegment[];
+}
+
+interface Subsegment {
+  id: string;
+  name: string;
+  value: number;
+}
+
+interface Props {
+  stockId: string;
+  periodId: string;
+}
+
+const CustomMetric: React.FC<Props> = ({ stockId, periodId }) => {
+  const [metrics, setMetrics] = useState<Metric[]>([]);
   const [selectedMetrics, setSelectedMetrics] = useState<string[]>([]);
 
-  // Fetch metric list and their values
+  // --- Fetch metrics + values ---
   const fetchMetrics = async () => {
+    // Fetch main metrics
     const { data: metricList } = await supabase
       .from("financial_metric")
-      .select("id, metric_name, stock_id")
-      .eq("stock_id", currentStockId);
+      .select("id, metric_name")
+      .eq("stock_id", stockId);
 
+    // Fetch metric values
     const { data: metricValues } = await supabase
       .from("financial_values")
-      .select("metric_id, value")
-      .eq("period", currentPeriod);
+      .select("metric_id, subsegment_id, value")
+      .eq("stock_id", stockId)
+      .eq("period_id", periodId);
 
-    const merged = metricList?.map(m => ({
-      ...m,
-      value: metricValues?.find(v => v.metric_id === m.id)?.value || 0
-    })) || [];
+    const merged: Metric[] = metricList?.map(m => {
+      const mainValue = metricValues?.find(
+        v => v.metric_id === m.id && v.subsegment_id === null
+      )?.value || 0;
+
+      const subsegments = metricValues
+        ?.filter(v => v.metric_id === m.id && v.subsegment_id !== null)
+        .map(v => ({ id: v.subsegment_id!, name: "", value: v.value }));
+
+      return { ...m, value: mainValue, subsegments };
+    }) || [];
 
     setMetrics(merged);
   };
@@ -29,35 +58,65 @@ const CustomMetric = ({ currentPeriod, currentStockId }) => {
     fetchMetrics();
   }, []);
 
-  // Handle input change
-  const handleInputChange = (metricId: string, value: number) => {
+  // --- Debounced save functions ---
+  const saveMainMetric = useCallback(
+    debounce(async (metricId: string, value: number) => {
+      const { error } = await supabase
+        .from("financial_values")
+        .upsert({
+          stock_id: stockId,
+          metric_id: metricId,
+          subsegment_id: null,
+          period_id: periodId,
+          value,
+        });
+      if (error) console.error("Save main metric failed:", error.message);
+    }, 300),
+    [stockId, periodId]
+  );
+
+  const saveSubsegment = useCallback(
+    debounce(async (metricId: string, subsegmentId: string, value: number) => {
+      const { error } = await supabase
+        .from("financial_values")
+        .upsert({
+          stock_id: stockId,
+          metric_id: metricId,
+          subsegment_id: subsegmentId,
+          period_id: periodId,
+          value,
+        });
+      if (error) console.error("Save subsegment failed:", error.message);
+    }, 300),
+    [stockId, periodId]
+  );
+
+  // --- Handlers ---
+  const handleMainChange = (metricId: string, value: number) => {
     setMetrics(prev =>
       prev.map(m => (m.id === metricId ? { ...m, value } : m))
     );
-
-    // Save value to Supabase
-    supabase
-      .from("financial_values")
-      .upsert({ metric_id: metricId, value, period: currentPeriod })
-      .then(({ error }) => {
-        if (error) console.error("Save failed:", error.message);
-      });
+    saveMainMetric(metricId, value);
   };
 
-  // Remove selected metrics
-  const handleRemove = async () => {
-    if (selectedMetrics.length === 0) return alert("Select at least one metric.");
-    if (!confirm(`Delete ${selectedMetrics.length} metrics?`)) return;
-
-    const { error } = await supabase
-      .from("financial_metric")
-      .delete()
-      .in("id", selectedMetrics);
-
-    if (error) return alert("Delete failed: " + error.message);
-
-    setSelectedMetrics([]);
-    fetchMetrics();
+  const handleSubsegmentChange = (
+    metricId: string,
+    subsegmentId: string,
+    value: number
+  ) => {
+    setMetrics(prev =>
+      prev.map(m =>
+        m.id === metricId
+          ? {
+              ...m,
+              subsegments: m.subsegments?.map(s =>
+                s.id === subsegmentId ? { ...s, value } : s
+              ),
+            }
+          : m
+      )
+    );
+    saveSubsegment(metricId, subsegmentId, value);
   };
 
   const toggleSelect = (id: string) => {
@@ -66,15 +125,33 @@ const CustomMetric = ({ currentPeriod, currentStockId }) => {
     );
   };
 
+  const handleRemove = async () => {
+    if (selectedMetrics.length === 0) return alert("Select metrics to delete.");
+    if (!confirm(`Delete ${selectedMetrics.length} metrics?`)) return;
+
+    const { error } = await supabase
+      .from("financial_metric")
+      .delete()
+      .in("id", selectedMetrics);
+
+    if (error) return alert("Delete failed: " + error.message);
+    setSelectedMetrics([]);
+    fetchMetrics();
+  };
+
   return (
     <div>
       <h2>Custom Metric</h2>
-      <button onClick={handleRemove} className="bg-red-500 text-white px-3 py-1 rounded">
+      <button
+        onClick={handleRemove}
+        className="bg-red-500 text-white px-3 py-1 rounded mb-2"
+      >
         Remove Selected
       </button>
+
       <ul>
         {metrics.map(m => (
-          <li key={m.id}>
+          <li key={m.id} className="mb-2">
             <input
               type="checkbox"
               checked={selectedMetrics.includes(m.id)}
@@ -84,8 +161,20 @@ const CustomMetric = ({ currentPeriod, currentStockId }) => {
             <input
               type="number"
               value={m.value}
-              onChange={e => handleInputChange(m.id, Number(e.target.value))}
+              onChange={e => handleMainChange(m.id, Number(e.target.value))}
             />
+            {m.subsegments?.map(s => (
+              <div key={s.id} style={{ marginLeft: "20px" }}>
+                Subsegment:{" "}
+                <input
+                  type="number"
+                  value={s.value}
+                  onChange={e =>
+                    handleSubsegmentChange(m.id, s.id, Number(e.target.value))
+                  }
+                />
+              </div>
+            ))}
           </li>
         ))}
       </ul>
