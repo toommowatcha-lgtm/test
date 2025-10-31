@@ -23,16 +23,15 @@ interface Props {
 const CustomMetric: React.FC<Props> = ({ stockId, periodId }) => {
   const [metrics, setMetrics] = useState<Metric[]>([]);
   const [selectedMetrics, setSelectedMetrics] = useState<string[]>([]);
+  const [newMetricName, setNewMetricName] = useState("");
 
   // --- Fetch metrics + values ---
   const fetchMetrics = async () => {
-    // Fetch main metrics
     const { data: metricList } = await supabase
       .from("financial_metric")
       .select("id, metric_name")
       .eq("stock_id", stockId);
 
-    // Fetch metric values
     const { data: metricValues } = await supabase
       .from("financial_values")
       .select("metric_id, subsegment_id, value")
@@ -125,6 +124,32 @@ const CustomMetric: React.FC<Props> = ({ stockId, periodId }) => {
     );
   };
 
+  // --- Add new metric ---
+  const handleAddMetric = async () => {
+    if (!newMetricName.trim()) return alert("Enter metric name");
+
+    const { data: newMetric, error } = await supabase
+      .from("financial_metric")
+      .insert([{ metric_name: newMetricName.trim(), stock_id: stockId }])
+      .select()
+      .single();
+
+    if (error) return alert("Add metric failed: " + error.message);
+
+    // Save initial value 0
+    await supabase.from("financial_values").upsert([{
+      stock_id: stockId,
+      metric_id: newMetric.id,
+      subsegment_id: null,
+      period_id: periodId,
+      value: 0
+    }]);
+
+    setNewMetricName("");
+    fetchMetrics();
+  };
+
+  // --- Remove selected metrics ---
   const handleRemove = async () => {
     if (selectedMetrics.length === 0) return alert("Select metrics to delete.");
     if (!confirm(`Delete ${selectedMetrics.length} metrics?`)) return;
@@ -142,6 +167,23 @@ const CustomMetric: React.FC<Props> = ({ stockId, periodId }) => {
   return (
     <div>
       <h2>Custom Metric</h2>
+
+      <div className="mb-2">
+        <input
+          type="text"
+          placeholder="New metric name"
+          value={newMetricName}
+          onChange={e => setNewMetricName(e.target.value)}
+          className="border p-1 mr-2"
+        />
+        <button
+          onClick={handleAddMetric}
+          className="bg-green-500 text-white px-3 py-1 rounded"
+        >
+          Add Metric
+        </button>
+      </div>
+
       <button
         onClick={handleRemove}
         className="bg-red-500 text-white px-3 py-1 rounded mb-2"
