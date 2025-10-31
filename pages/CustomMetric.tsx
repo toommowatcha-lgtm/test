@@ -27,16 +27,20 @@ const CustomMetric: React.FC<Props> = ({ stockId, periodId }) => {
 
   // --- Fetch metrics + values ---
   const fetchMetrics = async () => {
-    const { data: metricList } = await supabase
+    const { data: metricList, error: metricError } = await supabase
       .from("financial_metric")
       .select("id, metric_name")
       .eq("stock_id", stockId);
 
-    const { data: metricValues } = await supabase
+    if (metricError) return console.error("Fetch metric failed:", metricError.message);
+
+    const { data: metricValues, error: valueError } = await supabase
       .from("financial_values")
       .select("metric_id, subsegment_id, value")
       .eq("stock_id", stockId)
       .eq("period_id", periodId);
+
+    if (valueError) return console.error("Fetch values failed:", valueError.message);
 
     const merged: Metric[] = metricList?.map(m => {
       const mainValue = metricValues?.find(
@@ -70,6 +74,7 @@ const CustomMetric: React.FC<Props> = ({ stockId, periodId }) => {
           value,
         });
       if (error) console.error("Save main metric failed:", error.message);
+      else console.log("Main metric saved:", metricId, value);
     }, 300),
     [stockId, periodId]
   );
@@ -86,6 +91,7 @@ const CustomMetric: React.FC<Props> = ({ stockId, periodId }) => {
           value,
         });
       if (error) console.error("Save subsegment failed:", error.message);
+      else console.log("Subsegment saved:", subsegmentId, value);
     }, 300),
     [stockId, periodId]
   );
@@ -137,13 +143,15 @@ const CustomMetric: React.FC<Props> = ({ stockId, periodId }) => {
     if (error) return alert("Add metric failed: " + error.message);
 
     // Save initial value 0
-    await supabase.from("financial_values").upsert([{
+    const { error: valueError } = await supabase.from("financial_values").upsert([{
       stock_id: stockId,
       metric_id: newMetric.id,
       subsegment_id: null,
       period_id: periodId,
       value: 0
     }]);
+
+    if (valueError) console.error("Save initial value failed:", valueError.message);
 
     setNewMetricName("");
     fetchMetrics();
