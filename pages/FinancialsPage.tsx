@@ -230,11 +230,19 @@ const FinancialsPage: React.FC = () => {
     const debouncedSave = useCallback(debounce(async (payloads: Partial<FinancialValue>[]) => {
         setSaveStatus('saving');
         try {
-            for (const payload of payloads) {
+            // Requirement: Add console.log for debugging
+            console.log('Debounced save triggered with payloads:', payloads);
+
+            // Run save operations in parallel for performance, which is crucial for many metrics.
+            const savePromises = payloads.map(async (payload) => {
                 const { stock_id, metric_id, period_id, subsegment_id, value } = payload;
     
-                if (!stock_id || !metric_id || !period_id) continue;
+                if (!stock_id || !metric_id || !period_id) {
+                    console.warn('Skipping invalid payload:', payload);
+                    return; // Skip invalid payloads
+                }
     
+                // This logic correctly finds the specific row to update or determines if a new one is needed.
                 let checkQuery = supabase
                     .from('financial_values')
                     .select('id')
@@ -248,34 +256,36 @@ const FinancialsPage: React.FC = () => {
                     checkQuery = checkQuery.is('subsegment_id', null);
                 }
     
-                const { data: existing, error: checkError } = await checkQuery;
+                const { data: existing, error: checkError } = await checkQuery.limit(1).single();
     
-                if (checkError) {
-                    throw new Error(`DB check failed: ${checkError.message}`);
+                // PGRST116 code means "Not a single row was returned" which is expected when no value exists yet.
+                if (checkError && checkError.code !== 'PGRST116') {
+                    throw new Error(`DB check failed for metric ${metric_id}: ${checkError.message}`);
                 }
     
-                if (existing && existing.length > 0) {
-                    // Found at least one record, update the first one to handle duplicates gracefully.
+                if (existing) {
+                    // Update the existing record if found.
                     const { error: updateError } = await supabase
                         .from('financial_values')
                         .update({ value })
-                        .eq('id', existing[0].id);
+                        .eq('id', existing.id);
     
                     if (updateError) {
-                        throw new Error(`Update failed: ${updateError.message}`);
+                        throw new Error(`Update failed for metric ${metric_id}: ${updateError.message}`);
                     }
-                } else {
-                    // No record found, insert a new one if value is not null/undefined
-                    if (value !== null && value !== undefined) {
-                        const { error: insertError } = await supabase
-                            .from('financial_values')
-                            .insert(payload);
-                        if (insertError) {
-                            throw new Error(`Insert failed: ${insertError.message}`);
-                        }
+                } else if (value !== null && value !== undefined) {
+                    // Insert a new record only if a value is present.
+                    const { error: insertError } = await supabase
+                        .from('financial_values')
+                        .insert(payload);
+                    if (insertError) {
+                         throw new Error(`Insert failed for metric ${metric_id}: ${insertError.message}`);
                     }
                 }
-            }
+            });
+
+            await Promise.all(savePromises);
+
             showToast('saved', 'Changes saved');
         } catch (err) {
             showToast('error', formatErrorMessage('Save failed', err));
@@ -452,16 +462,11 @@ const FinancialsPage: React.FC = () => {
     };
     
     const deleteItem = async (type: 'metric' | 'sub' | 'period', id: string) => {
-        alert(`✅ Remove button clicked for ${type}!`);
-        console.log(`Remove button triggered for ${type}: ${id}`);
         if (!window.confirm(`Are you sure you want to delete this ${type}? This cannot be undone.`)) return;
     
         setSaveStatus('saving');
         try {
             if (type === 'metric') {
-                // This simplified logic directly attempts to delete the metric.
-                // If it fails due to a foreign key constraint (i.e., it has linked data),
-                // the catch block below will handle the specific error message as requested.
                 const { error } = await supabase.from('financial_metric').delete().eq('id', id);
                 if (error) throw error;
     
@@ -475,24 +480,19 @@ const FinancialsPage: React.FC = () => {
                 
                 await fetchData();
             } else if (type === 'period') {
+                const { error: valueError } = await supabase.from('financial_values').delete().eq('period_id', id);
+                if (valueError) throw valueError;
+
                 const { error } = await supabase.from('financial_period').delete().match({ id });
                 if (error) throw error;
                 
                 setPeriods(prev => prev.filter(p => p.id !== id));
-                setMetrics(prevMetrics => prevMetrics.map(m => ({
-                    ...m,
-                    financial_values: m.financial_values.filter(v => v.period_id !== id),
-                    financial_subsegments: m.financial_subsegments.map(s => ({
-                       ...s,
-                       financial_values: s.financial_values.filter(v => v.period_id !== id)
-                    }))
-                })));
             }
             showToast('saved', `${type.charAt(0).toUpperCase() + type.slice(1)} deleted successfully`);
         } catch (err: any) {
             let userMessage = formatErrorMessage(`Failed to delete ${type}`, err);
             if (err.message && err.message.includes('foreign key constraint')) {
-                userMessage = `Cannot delete this ${type} because it has linked financial data.`;
+                userMessage = `Cannot delete this ${type} because it has linked financial data. Please remove its sub-items first.`;
             }
             showToast('error', userMessage);
         }
@@ -507,11 +507,8 @@ const FinancialsPage: React.FC = () => {
     };
 
     const handleDeleteSelectedMetrics = async () => {
-        alert("✅ Remove button clicked!");
-        console.log("Remove button triggered successfully");
-
         if (selectedMetricIds.length === 0) {
-            alert("No metrics selected to delete.");
+            showToast('error', "No metrics selected to delete.");
             return;
         };
 
@@ -535,7 +532,7 @@ const FinancialsPage: React.FC = () => {
 
             setMetrics(prev => prev.filter(m => !selectedMetricIds.includes(m.id)));
             setSelectedMetricIds([]);
-            showToast('saved', 'Deleted successfully.');
+            showToast('saved', `${selectedMetricIds.length} metric(s) deleted.`);
 
         } catch (err: any) {
             let userMessage = formatErrorMessage('Failed to delete metrics', err);
