@@ -134,20 +134,23 @@ const CustomMetric: React.FC<Props> = ({ stockId, periodId }) => {
   const handleAddMetric = async () => {
     if (!newMetricName.trim()) return alert("Enter metric name");
 
+    // Insert metric first
     const { data: newMetric, error } = await supabase
       .from("financial_metric")
-      .insert([{ metric_name: newMetricName.trim(), stock_id: stockId }])
+      .insert([{ metric_name: newMetricName.trim(), stock_id }])
       .select()
       .single();
 
     if (error) return alert("Add metric failed: " + error.message);
 
+    const metricId = newMetric.id;
+
     // Save initial value 0
     const { error: valueError } = await supabase.from("financial_values").upsert([{
-      stock_id: stockId,
-      metric_id: newMetric.id,
+      stock_id,
+      metric_id: metricId,
       subsegment_id: null,
-      period_id: periodId,
+      period_id,
       value: 0
     }]);
 
