@@ -27,29 +27,57 @@ const CustomMetric: React.FC<CustomMetricProps> = ({ stockId, periodId }) => {
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // FIX: Replaced the manual select-then-update/insert logic with a direct Supabase `upsert` call.
-  // This is more efficient and correctly persists both new and existing metric values, fixing the data loss on refresh.
+  // Refactored to a robust manual "upsert" to handle new and existing values correctly,
+  // especially with nullable subsegment_id which can be tricky for Supabase's default upsert.
   const debouncedSave = useCallback(debounce(async (payloads: Partial<FinancialValue>[]) => {
     setIsSaving(true);
     setError(null);
     try {
-      if (payloads.length === 0) {
-        setIsSaving(false);
-        return;
-      }
-      
-      // Using Supabase's `upsert` is the correct, atomic way to handle this.
-      // It requires a unique constraint on the specified `onConflict` columns in the database schema
-      // to correctly identify which row to update or if a new one should be inserted.
-      const { error: upsertError } = await supabase
-        .from('financial_values')
-        .upsert(payloads);
+      const savePromises = payloads.map(async (payload) => {
+        const { stock_id, metric_id, period_id, subsegment_id, value } = payload;
 
-      if (upsertError) {
-        throw upsertError;
-      }
+        if (!stock_id || !metric_id || !period_id) {
+          console.warn('Skipping save for incomplete payload:', payload);
+          return;
+        }
 
-      console.log('Save successful (upsert):', payloads);
+        // 1. Check if a value already exists for this unique combination.
+        let query = supabase
+          .from('financial_values')
+          .select('id')
+          .eq('stock_id', stock_id)
+          .eq('metric_id', metric_id)
+          .eq('period_id', period_id);
+
+        if (subsegment_id) {
+          query = query.eq('subsegment_id', subsegment_id);
+        } else {
+          query = query.is('subsegment_id', null);
+        }
+
+        const { data: existing, error: checkError } = await query.maybeSingle();
+        if (checkError) throw checkError;
+
+        // 2. Decide whether to update or insert.
+        if (existing) {
+          // UPDATE the existing record.
+          const { error: updateError } = await supabase
+            .from('financial_values')
+            .update({ value })
+            .eq('id', existing.id);
+          if (updateError) throw updateError;
+        } else if (value !== null && value !== undefined) {
+          // INSERT a new record, but only if there's a value to save.
+          const { error: insertError } = await supabase
+            .from('financial_values')
+            .insert(payload);
+          if (insertError) throw insertError;
+        }
+      });
+
+      await Promise.all(savePromises);
+      console.log('Save successful (manual upsert):', payloads);
+
     } catch (err) {
       const message = formatErrorMessage('Save failed', err);
       setError(message);
@@ -69,6 +97,11 @@ const CustomMetric: React.FC<CustomMetricProps> = ({ stockId, periodId }) => {
       if (metricsError) throw metricsError;
 
       const metricIds = metricsData.map(m => m.id);
+      if (metricIds.length === 0) {
+        setMetrics([]);
+        setLoading(false);
+        return;
+      }
       
       const { data: subsegmentsData, error: subsegmentsError } = await supabase.from('financial_subsegment').select('*').in('metric_id', metricIds).order('display_order');
       if (subsegmentsError) throw subsegmentsError;
@@ -82,7 +115,8 @@ const CustomMetric: React.FC<CustomMetricProps> = ({ stockId, periodId }) => {
         const metricValue = valuesData.find(v => v.metric_id === metric.id && v.subsegment_id === null)?.value ?? null;
 
         const subsegmentsWithValues = subsegments.map(sub => {
-          const subValue = valuesData.find(v => v.subsegment_id === sub.id)?.value ?? null;
+          // FIX: Correctly match on both metric_id and subsegment_id to find the sub-value.
+          const subValue = valuesData.find(v => v.metric_id === metric.id && v.subsegment_id === sub.id)?.value ?? null;
           return { ...sub, value: subValue };
         });
 
@@ -139,15 +173,42 @@ const CustomMetric: React.FC<CustomMetricProps> = ({ stockId, periodId }) => {
   const handleAddNewMetric = async () => {
     if (!newMetricName.trim()) return;
     setLoading(true);
+    setError(null);
     try {
-        const { data, error } = await supabase.from('financial_metric').insert({ stock_id: stockId, metric_name: newMetricName, display_order: metrics.length }).select().single();
-        if (error || !data) throw error || new Error("Failed to get data for new metric");
-        
-        // This is the correct pattern: Add the metric to the database, get the generated ID back,
-        // and then update the local UI state. The first time a user enters a value, the debounced
-        // save function will correctly INSERT the new value record.
-        setMetrics(prev => [...prev, { ...data, value: null, financial_subsegments: [] }]);
+        // Step 1: Insert the new metric definition to get an ID.
+        const { data: newMetricData, error: metricError } = await supabase
+            .from('financial_metric')
+            .insert({ stock_id: stockId, metric_name: newMetricName, display_order: metrics.length })
+            .select()
+            .single();
+        if (metricError) throw metricError;
+        if (!newMetricData) throw new Error("Failed to get data for new metric");
+
+        // Step 2: Get all periods for the stock to create placeholder values for each.
+        const { data: periodsData, error: periodsError } = await supabase
+            .from('financial_period')
+            .select('id')
+            .eq('stock_id', stockId);
+        if (periodsError) throw periodsError;
+
+        // Step 3: Create a placeholder `financial_values` record for each period.
+        // This ensures that when a value is entered, we are UPDATING an existing row.
+        if (periodsData && periodsData.length > 0) {
+            const newValues = periodsData.map(period => ({
+                stock_id: stockId,
+                metric_id: newMetricData.id,
+                period_id: period.id,
+                value: null,
+            }));
+            const { error: valuesError } = await supabase
+                .from('financial_values')
+                .insert(newValues);
+            if (valuesError) throw valuesError;
+        }
+
         setNewMetricName('');
+        // Step 4: Refresh all data to reflect the new metric and its empty values.
+        await fetchData();
     } catch (err) {
         setError(formatErrorMessage('Failed to add metric', err));
     } finally {
@@ -157,7 +218,7 @@ const CustomMetric: React.FC<CustomMetricProps> = ({ stockId, periodId }) => {
 
   const handleRemoveSelectedMetrics = async () => {
     if (selectedMetricIds.length === 0) return;
-    if (window.confirm(`Are you sure you want to delete ${selectedMetricIds.length} metric(s)?`)) {
+    if (window.confirm(`Are you sure you want to delete ${selectedMetricIds.length} metric(s)? This cannot be undone.`)) {
         setLoading(true);
         try {
             const { error } = await supabase.from('financial_metric').delete().in('id', selectedMetricIds);
