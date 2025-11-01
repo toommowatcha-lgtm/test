@@ -12,6 +12,7 @@ interface FinancialInputProps {
   defaultValue: number | null;
   className?: string;
   placeholder?: string;
+  onValueChange?: (value: number | null) => void;
 }
 
 /**
@@ -26,6 +27,7 @@ const FinancialInput: React.FC<FinancialInputProps> = ({
   defaultValue,
   className = '',
   placeholder = '0.00',
+  onValueChange,
 }) => {
   const [value, setValue] = useState<string>(defaultValue === null || defaultValue === undefined ? '' : String(defaultValue));
   const [saveStatus, setSaveStatus] = useState<SaveStatus>('idle');
@@ -37,7 +39,7 @@ const FinancialInput: React.FC<FinancialInputProps> = ({
 
   // Memoized save function to perform the Supabase upsert logic.
   const saveValue = useCallback(async (valueToSave: number | null) => {
-    console.log('Attempting to save value:', valueToSave);
+    console.log('Attempting to save financial value:', { stockId, metricId, periodId, subsegmentId, value: valueToSave });
     setSaveStatus('saving');
 
     try {
@@ -92,14 +94,18 @@ const FinancialInput: React.FC<FinancialInputProps> = ({
       
       console.log('Save successful for payload:', payload);
       setSaveStatus('idle');
+      if (onValueChange) {
+        onValueChange(valueToSave);
+      }
 
     } catch (error) {
       console.error('Failed to save financial value:', error);
       setSaveStatus('error');
     }
-  }, [stockId, metricId, periodId, subsegmentId]);
+  }, [stockId, metricId, periodId, subsegmentId, onValueChange]);
 
   // Create a debounced version of the save function.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   const debouncedSave = useCallback(debounce(saveValue, 500), [saveValue]);
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
