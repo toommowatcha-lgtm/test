@@ -3,10 +3,10 @@ import { useParams, Link } from 'react-router-dom';
 import { supabase } from '../services/supabaseClient';
 import { WatchlistItem, FinancialMetric, FinancialSubsegment, FinancialValue, FinancialPeriod } from '../types';
 import { ComposedChart, Bar, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, LabelList } from 'recharts';
-import { debounce } from 'lodash';
 import Card from '../components/ui/Card';
 import Button from '../components/ui/Button';
 import Toast, { SaveStatus } from '../components/ui/Toast';
+import FinancialInput from '../components/ui/FinancialInput';
 import { ArrowLeft, Plus, Trash2, LineChart as LineChartIcon, BarChart as BarChartIcon, Loader2 } from 'lucide-react';
 import { formatErrorMessage } from '../utils/errorHandler';
 
@@ -227,127 +227,70 @@ const FinancialsPage: React.FC = () => {
 
     useEffect(() => { fetchData(); }, [fetchData]);
     
-    const debouncedSave = useCallback(debounce(async (payloads: Partial<FinancialValue>[]) => {
-        setSaveStatus('saving');
+     const saveParentMetricTotal = useCallback(async (metricId: string, periodId: string, total: number | null) => {
         try {
-            // This logic processes all pending saves in parallel. While it makes many
-            // network requests, it is robust against database schemas that may lack a
-            // composite unique key required for a bulk `upsert` operation.
-            const savePromises = payloads.map(async (payload) => {
-                const { stock_id, metric_id, period_id, subsegment_id, value } = payload;
-    
-                if (!stock_id || !metric_id || !period_id) {
-                    console.warn('Skipping invalid payload:', payload);
-                    return; // Skip invalid payloads
-                }
-    
-                // Check if a record already exists to decide between UPDATE and INSERT.
-                let checkQuery = supabase
-                    .from('financial_values')
-                    .select('id')
-                    .eq('stock_id', stock_id)
-                    .eq('metric_id', metric_id)
-                    .eq('period_id', period_id);
-    
-                if (subsegment_id) {
-                    checkQuery = checkQuery.eq('subsegment_id', subsegment_id);
-                } else {
-                    checkQuery = checkQuery.is('subsegment_id', null);
-                }
-    
-                const { data: existing, error: checkError } = await checkQuery.limit(1).single();
-    
-                // 'PGRST116' means no row was found, which is expected for new values.
-                if (checkError && checkError.code !== 'PGRST116') {
-                    throw new Error(`DB check failed for metric ${metric_id}: ${checkError.message}`);
-                }
-    
-                if (existing) {
-                    // Update the existing record if found.
-                    const { error: updateError } = await supabase
-                        .from('financial_values')
-                        .update({ value })
-                        .eq('id', existing.id);
-    
-                    if (updateError) throw new Error(`Update failed for metric ${metric_id}: ${updateError.message}`);
-                } else if (value !== null && value !== undefined) {
-                    // Insert a new record only if a value is present.
-                    const { error: insertError } = await supabase.from('financial_values').insert(payload);
-                    if (insertError) throw new Error(`Insert failed for metric ${metric_id}: ${insertError.message}`);
-                }
-            });
+            const { error: upsertError } = await supabase
+                .from('financial_values')
+                .upsert({
+                    stock_id: stockId,
+                    metric_id: metricId,
+                    period_id: periodId,
+                    subsegment_id: null,
+                    value: total,
+                }, { onConflict: 'stock_id,metric_id,period_id,subsegment_id' }); // Assumes composite key exists for upsert
 
-            await Promise.all(savePromises);
-
-            showToast('saved', 'Changes saved');
+            if (upsertError) throw upsertError;
         } catch (err) {
-            showToast('error', formatErrorMessage('Save failed', err));
+            showToast('error', formatErrorMessage('Failed to save parent total', err));
         }
-    }, 1500), [stockId, showToast]);
+    }, [stockId, showToast]);
 
-    const handleValueChange = (metric_id: string, subsegment_id: string | null, period_id: string, valueStr: string) => {
-        const value = valueStr === '' ? null : parseFloat(valueStr);
-        if (valueStr !== '' && isNaN(value as number)) return;
+    const handleSaveSuccess = useCallback((metricId: string, subsegmentId: string | null, periodId: string, newValue: number | null) => {
+        setMetrics(currentMetrics => {
+            const newMetrics = JSON.parse(JSON.stringify(currentMetrics));
+            const metric = newMetrics.find((m: FinancialMetric) => m.id === metricId);
+            if (!metric) return currentMetrics;
 
-        const newMetrics = JSON.parse(JSON.stringify(metrics));
-        const payloadsToSave: Partial<FinancialValue>[] = [];
-        
-        const metric = newMetrics.find((m: FinancialMetric) => m.id === metric_id);
-        if (!metric) return;
-
-        const mainPayload: Partial<FinancialValue> = { stock_id: stockId, metric_id, subsegment_id, period_id, value };
-        payloadsToSave.push(mainPayload);
-
-        const target = subsegment_id
-            ? metric.financial_subsegments.find((s: FinancialSubsegment) => s.id === subsegment_id)
-            : metric;
-
-        if (!target) return;
-
-        let valueUpdated = false;
-        target.financial_values = target.financial_values.map((v: FinancialValue) => {
-            if (v.period_id === period_id) {
-                valueUpdated = true;
-                return { ...v, value };
-            }
-            return v;
-        });
-
-        if (!valueUpdated) {
-            const newId = crypto.randomUUID();
-            target.financial_values.push({ id: newId, created_at: new Date().toISOString(), ...mainPayload });
-        }
-        
-        if (subsegment_id && metric.financial_subsegments.length > 0) {
-            const total = metric.financial_subsegments.reduce((sum: number, sub: FinancialSubsegment) => {
-                const subValue = sub.financial_values.find((v: FinancialValue) => v.period_id === period_id)?.value || 0;
-                return sum + subValue;
-            }, 0);
-
-            const parentMetricPayload: Partial<FinancialValue> = { stock_id: stockId, metric_id, subsegment_id: null, period_id, value: total };
-            payloadsToSave.push(parentMetricPayload);
+            const target = subsegmentId
+                ? metric.financial_subsegments.find((s: FinancialSubsegment) => s.id === subsegmentId)
+                : metric;
+            if (!target) return currentMetrics;
             
-            let parentValueUpdated = false;
-            metric.financial_values = metric.financial_values.map((v: FinancialValue) => {
-                if (v.period_id === period_id && v.subsegment_id === null) {
-                    parentValueUpdated = true;
-                    return { ...v, value: total };
+            let valueUpdated = false;
+            target.financial_values = target.financial_values.map((v: FinancialValue) => {
+                if (v.period_id === periodId) {
+                    valueUpdated = true;
+                    return { ...v, value: newValue };
                 }
                 return v;
             });
-
-            if (!parentValueUpdated) {
-                const newId = crypto.randomUUID();
-                metric.financial_values.push({ id: newId, created_at: new Date().toISOString(), ...parentMetricPayload });
+            if (!valueUpdated) {
+                target.financial_values.push({ id: crypto.randomUUID(), period_id: periodId, value: newValue });
             }
-        }
-        
-        setMetrics(newMetrics);
-        
-        if (payloadsToSave.length > 0) {
-            debouncedSave(payloadsToSave);
-        }
-    };
+
+            if (subsegmentId) {
+                const total = metric.financial_subsegments.reduce((sum: number, sub: any) => {
+                    const subVal = sub.financial_values.find((v: FinancialValue) => v.period_id === periodId)?.value || 0;
+                    return sum + subVal;
+                }, 0);
+
+                let parentValueUpdated = false;
+                metric.financial_values = metric.financial_values.map((v: FinancialValue) => {
+                    if (v.period_id === periodId && v.subsegment_id === null) {
+                        parentValueUpdated = true;
+                        return { ...v, value: total };
+                    }
+                    return v;
+                });
+                if (!parentValueUpdated) {
+                    metric.financial_values.push({ id: crypto.randomUUID(), period_id: periodId, value: total });
+                }
+
+                saveParentMetricTotal(metricId, periodId, total);
+            }
+            return newMetrics;
+        });
+    }, [saveParentMetricTotal]);
     
     const handleNameUpdate = async (type: 'metric' | 'sub' | 'period', id: string, newName: string) => {
         const table = type === 'metric' ? 'financial_metric' : type === 'sub' ? 'financial_subsegment' : 'financial_period';
@@ -385,7 +328,6 @@ const FinancialsPage: React.FC = () => {
         if (!stockId) return;
         setSaveStatus('saving');
         try {
-            // Step 1: Insert the new metric definition to get an ID.
             const { data: newMetricData, error: metricError } = await supabase
                 .from('financial_metric')
                 .insert({ stock_id: stockId, metric_name: 'New Metric', display_order: metrics.length })
@@ -394,32 +336,27 @@ const FinancialsPage: React.FC = () => {
             if (metricError) throw metricError;
             if (!newMetricData) throw new Error("Failed to get data for new metric.");
     
-            // Step 2: Create placeholder `financial_values` records for each existing period.
-            // This is the critical fix to ensure that entering a value is always an UPDATE,
-            // which prevents data from disappearing on refresh.
             if (periods.length > 0) {
                 const newValues = periods.map(period => ({
                     stock_id: stockId,
                     metric_id: newMetricData.id,
                     period_id: period.id,
-                    value: null, // Default to null
+                    value: null,
                 }));
                 const { error: valuesError } = await supabase.from('financial_values').insert(newValues);
                 if (valuesError) throw valuesError;
             }
     
-            // Step 3: Eagerly update local state for a responsive UI.
             const newMetric: FinancialMetric = { ...newMetricData, financial_subsegments: [], financial_values: [] };
             setMetrics(prev => [...prev, newMetric]);
             showToast('saved', 'Metric added successfully.');
         } catch (err) {
             showToast('error', formatErrorMessage('Failed to add metric', err));
-            await fetchData(); // Refetch data on error to ensure consistency
+            await fetchData();
         }
     };
 
     const addSubsegment = async (metric_id: string) => {
-        await debouncedSave.flush();
         const parentMetric = metrics.find(m => m.id === metric_id);
         if (!parentMetric) return;
     
@@ -434,7 +371,6 @@ const FinancialsPage: React.FC = () => {
             const newSub: FinancialSubsegment = { ...newSubData, financial_values: [] };
     
             if (isFirstSubsegment && parentMetric.financial_values.length > 0) {
-                // Copy parent's values to the new sub-segment.
                 const valuesToMove = parentMetric.financial_values
                     .filter(v => v.value !== null && v.value !== 0)
                     .map(({ id, created_at, ...rest }) => ({ ...rest, subsegment_id: newSubData.id }));
@@ -443,17 +379,13 @@ const FinancialsPage: React.FC = () => {
                     const { error: valuesInsertError } = await supabase.from('financial_values').insert(valuesToMove);
                     if (valuesInsertError) throw valuesInsertError;
                     
-                    // Eagerly update local state object
                     newSub.financial_values = valuesToMove.map(v => ({...v, id: crypto.randomUUID(), created_at: new Date().toISOString()}));
                 }
             }
     
-            // Update local state to reflect the new structure.
             setMetrics(prevMetrics => prevMetrics.map(m => {
                 if (m.id === metric_id) {
                     const updatedMetric = { ...m, financial_subsegments: [...m.financial_subsegments, newSub] };
-                    // If this was the first subsegment, the parent's values are now derived.
-                    // Its local state should reflect the sum (which is just the new subsegment's value).
                     if (isFirstSubsegment) {
                         updatedMetric.financial_values = newSub.financial_values.map(v => ({...v, subsegment_id: null}));
                     }
@@ -464,7 +396,7 @@ const FinancialsPage: React.FC = () => {
             showToast('saved', 'Sub-segment added successfully');
         } catch (err) {
             showToast('error', formatErrorMessage('Failed to add sub-segment', err));
-            await fetchData(); // Refetch to ensure consistency on error
+            await fetchData();
         }
     };
 
@@ -770,13 +702,13 @@ const FinancialsPage: React.FC = () => {
                                                 </div>
                                             </div>
                                         </td>
-                                        {tablePeriods.map(p => <td key={p.id} className="p-1 w-32 text-right pr-3 font-semibold">{metric.financial_subsegments.length > 0 ? (activeTab === 'quarterly' ? valueFormatter(metric.financial_values.find(v => v.period_id === p.id)?.value ?? 0) : valueFormatter(getAnnualValue(metric.id, null, p.period_label))) : (activeTab === 'quarterly' ? <input type="number" step="any" value={metric.financial_values.find(v => v.period_id === p.id)?.value ?? ''} onChange={e => handleValueChange(metric.id, null, p.id, e.target.value)} placeholder="-" className="w-full bg-transparent p-2 text-right rounded hover:bg-accent focus:bg-accent" disabled={!isEditMode}/> : <div className="w-full bg-transparent p-2 text-right rounded">{valueFormatter(getAnnualValue(metric.id, null, p.period_label))}</div>)}</td>)}
+                                        {tablePeriods.map(p => <td key={p.id} className="p-1 w-32 text-right pr-3 font-semibold">{metric.financial_subsegments.length > 0 ? (activeTab === 'quarterly' ? valueFormatter(metric.financial_values.find(v => v.period_id === p.id)?.value ?? 0) : valueFormatter(getAnnualValue(metric.id, null, p.period_label))) : (activeTab === 'quarterly' ? <FinancialInput stockId={stockId} metricId={metric.id} periodId={p.id} defaultValue={metric.financial_values.find(v => v.period_id === p.id)?.value ?? null} disabled={!isEditMode} onSaveSuccess={(newValue) => handleSaveSuccess(metric.id, null, p.id, newValue)} /> : <div className="w-full bg-transparent p-2 text-right rounded">{valueFormatter(getAnnualValue(metric.id, null, p.period_label))}</div>)}</td>)}
                                         {activeTab === 'quarterly' && <td></td>}
                                     </tr>
                                     {metric.financial_subsegments.map(sub => (
                                         <tr key={sub.id} className="hover:bg-accent/20">
                                             <td className="p-2 pl-6 sticky left-0 bg-content z-10 w-52"><EditableHeader id={sub.id} initialValue={sub.subsegment_name} onUpdate={handleNameUpdate.bind(null, 'sub')} onDelete={deleteItem.bind(null, 'sub')} isMetric forceEditMode={isEditMode} isSaving={saveStatus === 'saving'} /></td>
-                                            {tablePeriods.map(p => <td key={p.id} className="p-1 w-32">{activeTab === 'quarterly' ? <input type="number" step="any" value={sub.financial_values.find(v => v.period_id === p.id)?.value ?? ''} onChange={e => handleValueChange(metric.id, sub.id, p.id, e.target.value)} placeholder="-" className="w-full bg-transparent p-2 text-right rounded hover:bg-accent focus:bg-accent" disabled={!isEditMode}/> : <div className="w-full bg-transparent p-2 text-right rounded">{valueFormatter(getAnnualValue(metric.id, sub.id, p.period_label))}</div>}</td>)}
+                                            {tablePeriods.map(p => <td key={p.id} className="p-1 w-32">{activeTab === 'quarterly' ? <FinancialInput stockId={stockId} metricId={metric.id} periodId={p.id} subsegmentId={sub.id} defaultValue={sub.financial_values.find(v => v.period_id === p.id)?.value ?? null} disabled={!isEditMode} onSaveSuccess={(newValue) => handleSaveSuccess(metric.id, sub.id, p.id, newValue)}/> : <div className="w-full bg-transparent p-2 text-right rounded">{valueFormatter(getAnnualValue(metric.id, sub.id, p.period_label))}</div>}</td>)}
                                             {activeTab === 'quarterly' && <td></td>}
                                         </tr>
                                     ))}

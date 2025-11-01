@@ -1,8 +1,10 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { supabase } from '../../services/supabaseClient';
 import { debounce } from 'lodash';
+import { CheckCircle, AlertTriangle, Loader2 } from 'lucide-react';
+import { formatErrorMessage } from '../../utils/errorHandler';
 
-type SaveStatus = 'idle' | 'saving' | 'error';
+type SaveStatus = 'idle' | 'saving' | 'saved' | 'error';
 
 interface FinancialInputProps {
   stockId: string;
@@ -10,101 +12,92 @@ interface FinancialInputProps {
   periodId: string;
   subsegmentId?: string | null;
   defaultValue: number | null;
+  disabled?: boolean;
   className?: string;
   placeholder?: string;
-  onValueChange?: (value: number | null) => void;
+  onSaveSuccess?: (newValue: number | null) => void;
 }
 
-/**
- * A reusable numeric input component that debounces user input and automatically
- * saves (upserts) the value to the 'financial_values' table in Supabase.
- */
 const FinancialInput: React.FC<FinancialInputProps> = ({
   stockId,
   metricId,
   periodId,
   subsegmentId = null,
   defaultValue,
+  disabled = false,
   className = '',
-  placeholder = '0.00',
-  onValueChange,
+  placeholder = '-',
+  onSaveSuccess,
 }) => {
   const [value, setValue] = useState<string>(defaultValue === null || defaultValue === undefined ? '' : String(defaultValue));
   const [saveStatus, setSaveStatus] = useState<SaveStatus>('idle');
 
-  // If the defaultValue prop changes from the parent, update the internal state.
   useEffect(() => {
     setValue(defaultValue === null || defaultValue === undefined ? '' : String(defaultValue));
   }, [defaultValue]);
 
-  // Memoized save function to perform the Supabase upsert logic.
   const saveValue = useCallback(async (valueToSave: number | null) => {
-    console.log('Attempting to save financial value:', { stockId, metricId, periodId, subsegmentId, value: valueToSave });
     setSaveStatus('saving');
+    
+    const MAX_RETRIES = 3;
+    const RETRY_DELAY = 200;
 
-    try {
-      // 1. Check if a record already exists to determine if we need to INSERT or UPDATE.
-      let selectQuery = supabase
-        .from('financial_values')
-        .select('id')
-        .eq('stock_id', stockId)
-        .eq('metric_id', metricId)
-        .eq('period_id', periodId);
-
-      if (subsegmentId) {
-        selectQuery = selectQuery.eq('subsegment_id', subsegmentId);
-      } else {
-        selectQuery = selectQuery.is('subsegment_id', null);
-      }
-
-      const { data: existingRecord, error: checkError } = await selectQuery.maybeSingle();
-
-      if (checkError) {
-        throw new Error(`Database check failed: ${checkError.message}`);
-      }
-
-      const payload = {
-        stock_id: stockId,
-        metric_id: metricId,
-        period_id: periodId,
-        subsegment_id: subsegmentId,
-        value: valueToSave,
-        updated_at: new Date().toISOString(),
-      };
-
-      if (existingRecord) {
-        // 2. UPDATE the existing record.
-        console.log('Updating existing record:', existingRecord.id, payload);
-        const { error: updateError } = await supabase
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        let query = supabase
           .from('financial_values')
-          .update({ value: valueToSave, updated_at: new Date().toISOString() })
-          .eq('id', existingRecord.id);
-
-        if (updateError) throw updateError;
-
-      } else if (valueToSave !== null) {
-        // 3. INSERT a new record, but only if there's a non-null value to save.
-        console.log('Inserting new record:', payload);
-        const { error: insertError } = await supabase
-          .from('financial_values')
-          .insert(payload);
+          .select('id')
+          .eq('stock_id', stockId)
+          .eq('metric_id', metricId)
+          .eq('period_id', periodId);
         
-        if (insertError) throw insertError;
-      }
-      
-      console.log('Save successful for payload:', payload);
-      setSaveStatus('idle');
-      if (onValueChange) {
-        onValueChange(valueToSave);
-      }
+        if (subsegmentId) {
+          query = query.eq('subsegment_id', subsegmentId);
+        } else {
+          query = query.is('subsegment_id', null);
+        }
+        
+        // FIX: Change from .maybeSingle() to a regular query to handle potential duplicate records.
+        const { data: existingRecords, error: checkError } = await query;
+        if (checkError) throw checkError;
 
-    } catch (error) {
-      console.error('Failed to save financial value:', error);
-      setSaveStatus('error');
+        const payload = { stock_id: stockId, metric_id: metricId, period_id: periodId, subsegment_id: subsegmentId, value: valueToSave };
+        
+        if (existingRecords && existingRecords.length > 0) {
+          // If duplicates exist, update all of them to resolve the inconsistency.
+          if (existingRecords.length > 1) {
+            console.warn(`Found ${existingRecords.length} duplicate records for metric ${metricId}. Updating all of them.`);
+          }
+          const updatePromises = existingRecords.map(record =>
+            supabase.from('financial_values').update({ value: valueToSave }).eq('id', record.id)
+          );
+          const results = await Promise.all(updatePromises);
+          const firstError = results.find(res => res.error);
+          if (firstError) throw firstError.error;
+
+        } else if (valueToSave !== null) {
+          // No existing record, so insert a new one if there's a value.
+          const { error: insertError } = await supabase.from('financial_values').insert(payload);
+          if (insertError) throw insertError;
+        }
+        
+        setSaveStatus('saved');
+        setTimeout(() => setSaveStatus('idle'), 2000);
+        onSaveSuccess?.(valueToSave);
+        return; // Success, exit retry loop
+
+      } catch (error) {
+        const errorMessage = formatErrorMessage(`Save attempt ${attempt} for metric ${metricId} failed`, error);
+        console.error(errorMessage);
+        if (attempt === MAX_RETRIES) {
+          setSaveStatus('error');
+        } else {
+          await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
+        }
+      }
     }
-  }, [stockId, metricId, periodId, subsegmentId, onValueChange]);
+  }, [stockId, metricId, periodId, subsegmentId, onSaveSuccess]);
 
-  // Create a debounced version of the save function.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const debouncedSave = useCallback(debounce(saveValue, 500), [saveValue]);
 
@@ -112,30 +105,43 @@ const FinancialInput: React.FC<FinancialInputProps> = ({
     const inputValue = e.target.value;
     setValue(inputValue);
     
-    // Convert to number or null for saving.
+    // Reset status on new input to provide immediate feedback
+    if (saveStatus === 'error') {
+        setSaveStatus('idle');
+    }
+
+    setSaveStatus('saving');
     const numericValue = inputValue === '' ? null : parseFloat(inputValue);
 
-    // Basic validation: proceed if empty or a valid number.
     if (inputValue === '' || !isNaN(numericValue as number)) {
       debouncedSave(numericValue);
     }
   };
-
-  const statusClasses = {
-    idle: 'focus:ring-primary border-gray-600',
-    saving: 'ring-2 ring-primary border-primary',
-    error: 'ring-2 ring-danger border-danger',
+  
+  const getStatusIndicator = () => {
+    switch(saveStatus) {
+      case 'saving': return <Loader2 className="w-4 h-4 text-primary animate-spin" />;
+      case 'saved': return <CheckCircle className="w-4 h-4 text-success" />;
+      case 'error': return <AlertTriangle className="w-4 h-4 text-danger" />;
+      default: return null;
+    }
   };
 
   return (
-    <input
-      type="number"
-      step="any"
-      value={value}
-      onChange={handleChange}
-      placeholder={placeholder}
-      className={`w-full bg-transparent p-2 text-right rounded hover:bg-accent focus:bg-accent focus:outline-none transition-shadow duration-200 ${statusClasses[saveStatus]} ${className}`}
-    />
+    <div className={`relative flex items-center ${className}`}>
+      <input
+        type="number"
+        step="any"
+        value={value}
+        onChange={handleChange}
+        placeholder={placeholder}
+        disabled={disabled}
+        className="w-full bg-transparent p-2 text-right rounded hover:bg-accent focus:bg-accent focus:outline-none disabled:cursor-not-allowed disabled:text-text-secondary"
+      />
+      <div className="absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none">
+        {getStatusIndicator()}
+      </div>
+    </div>
   );
 };
 
