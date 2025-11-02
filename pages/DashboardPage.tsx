@@ -1,10 +1,10 @@
-
-import React from 'react';
+import React, { useState } from 'react';
 import Card from '../components/ui/Card';
 import Button from '../components/ui/Button';
 import Sparkline from '../components/charts/Sparkline';
-import { ArrowUpRight, ArrowDownRight, DollarSign, Percent, Calendar } from 'lucide-react';
+import { ArrowUpRight, ArrowDownRight, DollarSign, Percent, Calendar, Loader2, Bot } from 'lucide-react';
 import { SparklineData } from '../types';
+import { GoogleGenAI } from '@google/genai';
 
 // Mock data for dashboard
 const summaryData = {
@@ -41,7 +41,45 @@ const SummaryCard = ({ title, value, change, icon: Icon, isCurrency = true }: { 
     );
 };
 
+// Function to render markdown-like content safely
+const renderGeneratedContent = (content: string) => {
+    const htmlContent = content
+      .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>') // Bold
+      .replace(/\*/g, '') // Remove asterisks that are not part of bolding
+      .replace(/(\r\n|\n|\r)/gm, "<br />"); // Newlines
+    return { __html: htmlContent };
+};
+
 const DashboardPage: React.FC = () => {
+    const [newsSummary, setNewsSummary] = useState('');
+    const [isGeneratingNews, setIsGeneratingNews] = useState(false);
+    const [newsError, setNewsError] = useState<string | null>(null);
+
+    const generateNewsSummary = async () => {
+        setIsGeneratingNews(true);
+        setNewsError(null);
+        setNewsSummary('');
+
+        try {
+            const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
+            const prompt = "Provide a brief summary of the most important financial market news from the last 24 hours. Format it as a list of 3-4 key headlines with a one-sentence summary for each. Use markdown for bolding the headlines (e.g., **Headline:** Summary).";
+            
+            const response = await ai.models.generateContent({
+                model: 'gemini-2.5-flash',
+                contents: prompt,
+            });
+
+            setNewsSummary(response.text);
+
+        } catch (error) {
+            console.error("Error generating news summary:", error);
+            setNewsError("Sorry, I couldn't fetch the latest news summary. Please try again later.");
+        } finally {
+            setIsGeneratingNews(false);
+        }
+    };
+
+
   return (
     <div className="space-y-6">
       <h1 className="text-3xl font-bold">Dashboard</h1>
@@ -90,23 +128,48 @@ const DashboardPage: React.FC = () => {
           </div>
         </Card>
 
-        {/* Recent Activity */}
+        {/* Recent News */}
         <Card>
-          <h2 className="text-xl font-semibold mb-4">Recent News</h2>
-          <div className="space-y-4">
-            {/* Mock news items */}
-            <div className="text-sm">
-              <p className="font-semibold">Apple announces new iPhone, stock jumps 2%.</p>
-              <p className="text-xs text-text-secondary">MarketWatch - 2h ago</p>
-            </div>
-            <div className="text-sm">
-              <p className="font-semibold">Fed holds interest rates steady amid inflation concerns.</p>
-              <p className="text-xs text-text-secondary">Reuters - 5h ago</p>
-            </div>
-             <div className="text-sm">
-              <p className="font-semibold">NVIDIA posts record earnings on AI chip demand.</p>
-              <p className="text-xs text-text-secondary">Bloomberg - 1d ago</p>
-            </div>
+          <div className="flex justify-between items-center mb-4">
+            <h2 className="text-xl font-semibold">Recent News</h2>
+            <Button 
+                variant="secondary" 
+                size="sm" 
+                onClick={generateNewsSummary}
+                disabled={isGeneratingNews}
+                aria-label="Generate news summary"
+            >
+                {isGeneratingNews ? (
+                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                ) : (
+                    <Bot className="w-4 h-4 mr-2" />
+                )}
+                Generate
+            </Button>
+          </div>
+          <div className="space-y-4 text-sm min-h-[150px]">
+            {isGeneratingNews && (
+              <div className="flex flex-col items-center justify-center h-full text-text-secondary" aria-live="polite">
+                <Loader2 className="w-8 h-8 animate-spin mb-2" />
+                <p>Generating news summary...</p>
+              </div>
+            )}
+            {newsError && (
+              <div className="p-3 bg-danger/20 text-danger rounded-md" role="alert">
+                {newsError}
+              </div>
+            )}
+            {newsSummary && (
+                <div 
+                    className="text-text-secondary space-y-2"
+                    dangerouslySetInnerHTML={renderGeneratedContent(newsSummary)}
+                />
+            )}
+            {!isGeneratingNews && !newsSummary && !newsError && (
+                <div className="flex flex-col items-center justify-center h-full text-text-secondary text-center">
+                    <p>Click "Generate" to get an AI-powered summary of recent financial news.</p>
+                </div>
+            )}
           </div>
         </Card>
       </div>
