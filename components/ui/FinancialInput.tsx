@@ -1,10 +1,7 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import { supabase } from '../../services/supabaseClient';
-import { debounce } from 'lodash';
-import { CheckCircle, AlertTriangle, Loader2 } from 'lucide-react';
-import { formatErrorMessage } from '../../utils/errorHandler';
-
-type SaveStatus = 'idle' | 'saving' | 'saved' | 'error';
+import React, { useState, useEffect } from 'react';
+import { CheckCircle, AlertTriangle, Loader2, RefreshCw } from 'lucide-react';
+import { useMetricSaveQueue } from '../../hooks/useMetricSaveQueue';
+import { SaveStatus } from '../../types';
 
 interface FinancialInputProps {
   stockId: string;
@@ -30,100 +27,51 @@ const FinancialInput: React.FC<FinancialInputProps> = ({
   onSaveSuccess,
 }) => {
   const [value, setValue] = useState<string>(defaultValue === null || defaultValue === undefined ? '' : String(defaultValue));
-  const [saveStatus, setSaveStatus] = useState<SaveStatus>('idle');
+  const { addToQueue, getSaveStatus } = useMetricSaveQueue();
+  const uniqueId = `${stockId}-${metricId}-${periodId}-${subsegmentId || 'null'}`;
 
+  // Sync with defaultValue prop when it changes from parent
   useEffect(() => {
     setValue(defaultValue === null || defaultValue === undefined ? '' : String(defaultValue));
   }, [defaultValue]);
 
-  const saveValue = useCallback(async (valueToSave: number | null) => {
-    setSaveStatus('saving');
-    
-    const MAX_RETRIES = 3;
-    const RETRY_DELAY = 200;
-
-    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-      try {
-        let query = supabase
-          .from('financial_values')
-          .select('id')
-          .eq('stock_id', stockId)
-          .eq('metric_id', metricId)
-          .eq('period_id', periodId);
-        
-        if (subsegmentId) {
-          query = query.eq('subsegment_id', subsegmentId);
-        } else {
-          query = query.is('subsegment_id', null);
-        }
-        
-        // FIX: Change from .maybeSingle() to a regular query to handle potential duplicate records.
-        const { data: existingRecords, error: checkError } = await query;
-        if (checkError) throw checkError;
-
-        const payload = { stock_id: stockId, metric_id: metricId, period_id: periodId, subsegment_id: subsegmentId, value: valueToSave };
-        
-        if (existingRecords && existingRecords.length > 0) {
-          // If duplicates exist, update all of them to resolve the inconsistency.
-          if (existingRecords.length > 1) {
-            console.warn(`Found ${existingRecords.length} duplicate records for metric ${metricId}. Updating all of them.`);
-          }
-          const updatePromises = existingRecords.map(record =>
-            supabase.from('financial_values').update({ value: valueToSave }).eq('id', record.id)
-          );
-          const results = await Promise.all(updatePromises);
-          const firstError = results.find(res => res.error);
-          if (firstError) throw firstError.error;
-
-        } else if (valueToSave !== null) {
-          // No existing record, so insert a new one if there's a value.
-          const { error: insertError } = await supabase.from('financial_values').insert(payload);
-          if (insertError) throw insertError;
-        }
-        
-        setSaveStatus('saved');
-        setTimeout(() => setSaveStatus('idle'), 2000);
-        onSaveSuccess?.(valueToSave);
-        return; // Success, exit retry loop
-
-      } catch (error) {
-        const errorMessage = formatErrorMessage(`Save attempt ${attempt} for metric ${metricId} failed`, error);
-        console.error(errorMessage);
-        if (attempt === MAX_RETRIES) {
-          setSaveStatus('error');
-        } else {
-          await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
-        }
-      }
-    }
-  }, [stockId, metricId, periodId, subsegmentId, onSaveSuccess]);
-
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  const debouncedSave = useCallback(debounce(saveValue, 500), [saveValue]);
-
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const inputValue = e.target.value;
     setValue(inputValue);
-    
-    // Reset status on new input to provide immediate feedback
-    if (saveStatus === 'error') {
-        setSaveStatus('idle');
-    }
 
-    setSaveStatus('saving');
     const numericValue = inputValue === '' ? null : parseFloat(inputValue);
 
+    // Only queue valid numbers or empty string (for clearing)
     if (inputValue === '' || !isNaN(numericValue as number)) {
-      debouncedSave(numericValue);
+      addToQueue(
+        {
+          id: uniqueId,
+          stock_id: stockId,
+          metric_id: metricId,
+          period_id: periodId,
+          subsegment_id: subsegmentId,
+          metric_value: numericValue,
+        },
+        onSaveSuccess
+      );
     }
   };
   
+  const statusInfo = getSaveStatus(uniqueId);
+
   const getStatusIndicator = () => {
-    switch(saveStatus) {
-      case 'saving': return <Loader2 className="w-4 h-4 text-primary animate-spin" />;
-      case 'saved': return <CheckCircle className="w-4 h-4 text-success" />;
-      case 'error': return <AlertTriangle className="w-4 h-4 text-danger" />;
-      default: return null;
+    switch(statusInfo.status) {
+      case 'queued':
+      case 'saving': 
+        return <Loader2 className="w-4 h-4 text-primary animate-spin" title="Saving..." />;
+      case 'saved': 
+        return <CheckCircle className="w-4 h-4 text-success" title="Saved" />;
+      case 'retrying':
+        return <RefreshCw className="w-4 h-4 text-yellow-500 animate-spin" title={statusInfo.error || "Retrying..."} />;
+      case 'error': 
+        return <AlertTriangle className="w-4 h-4 text-danger" title={statusInfo.error || "Save failed"} />;
+      default: 
+        return null;
     }
   };
 

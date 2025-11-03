@@ -1,7 +1,8 @@
 import React from 'react';
-import { CheckCircle, RefreshCw, AlertTriangle } from 'lucide-react';
+import { CheckCircle, RefreshCw, AlertTriangle, Loader2 } from 'lucide-react';
 
-export type SaveStatus = 'idle' | 'saving' | 'saved' | 'error';
+// Fix: Update SaveStatus to include all states from the save queue to match the type in `types.ts`.
+export type SaveStatus = 'idle' | 'queued' | 'saving' | 'saved' | 'retrying' | 'error';
 
 interface ToastProps {
     status: SaveStatus;
@@ -11,10 +12,15 @@ interface ToastProps {
 const Toast: React.FC<ToastProps> = ({ status, message }) => {
     const getStatusInfo = () => {
         switch (status) {
+            // Fix: Handle 'queued' and 'saving' states.
             case 'saving':
-                return { icon: <RefreshCw className="w-5 h-5 mr-2 animate-spin" />, text: 'Saving...', classes: 'bg-accent text-text-secondary', visible: true };
+            case 'queued':
+                return { icon: <Loader2 className="w-5 h-5 mr-2 animate-spin" />, text: 'Saving...', classes: 'bg-accent text-text-secondary', visible: true };
             case 'saved':
                 return { icon: <CheckCircle className="w-5 h-5 mr-2" />, text: message || 'Saved ✓', classes: 'bg-success text-white', visible: true };
+            // Fix: Add 'retrying' state.
+            case 'retrying':
+                return { icon: <RefreshCw className="w-5 h-5 mr-2 animate-spin" />, text: message || 'Retrying...', classes: 'bg-yellow-500 text-white', visible: true };
             case 'error':
                 return { icon: <AlertTriangle className="w-5 h-5 mr-2" />, text: message || 'Save failed', classes: 'bg-danger text-white', visible: true };
             default:

@@ -36,6 +36,11 @@ export const formatErrorMessage = (context: string, error: unknown): string => {
     if (message.includes('JWT')) {
         return `${context}: Authentication error. The Supabase Key may be invalid or expired.`;
     }
+    // FIX: Add specific handling for PGRST116 errors.
+    if (message.includes('PGRST116') || message.includes('multiple (or no) rows returned')) {
+        return `${context}: Data inconsistency found. Expected a single record but found multiple or none. This might be due to duplicate data from a previous error.`;
+    }
+
 
     // 4. Return the formatted message.
     return `${context}: ${message}`;

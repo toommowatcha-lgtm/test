@@ -1,14 +1,16 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { supabase } from '../services/supabaseClient';
-import { WatchlistItem, FinancialMetric, FinancialSubsegment, FinancialValue, FinancialPeriod } from '../types';
+// FIX: Import SaveStatus type.
+import { WatchlistItem, FinancialMetric, FinancialSubsegment, FinancialValue, FinancialPeriod, SaveStatus } from '../types';
 import { ComposedChart, Bar, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, LabelList } from 'recharts';
 import Card from '../components/ui/Card';
 import Button from '../components/ui/Button';
-import Toast, { SaveStatus } from '../components/ui/Toast';
+import Toast from '../components/ui/Toast';
 import FinancialInput from '../components/ui/FinancialInput';
 import { ArrowLeft, Plus, Trash2, LineChart as LineChartIcon, BarChart as BarChartIcon, Loader2 } from 'lucide-react';
 import { formatErrorMessage } from '../utils/errorHandler';
+import { MetricSaveProvider, useMetricSaveQueue } from '../hooks/useMetricSaveQueue';
 
 const COLORS = ['#06b6d4', '#22c55e', '#f97316', '#8b5cf6', '#ec4899', '#fde047', '#a855f7', '#64748b'];
 
@@ -128,7 +130,7 @@ const valueFormatter = (v: any): string => {
     return String(v ?? '');
 };
 
-const FinancialsPage: React.FC = () => {
+const FinancialsPageContent: React.FC = () => {
     const { stockId = '' } = useParams<{ stockId: string }>();
     const [stock, setStock] = useState<WatchlistItem | null>(null);
     const [metrics, setMetrics] = useState<FinancialMetric[]>([]);
@@ -147,6 +149,9 @@ const FinancialsPage: React.FC = () => {
     const tableCardRef = useRef<HTMLDivElement>(null);
     const editModeButtonRef = useRef<HTMLButtonElement>(null);
     const floatingPanelRef = useRef<HTMLDivElement>(null);
+
+    // FIX: Get `addToQueue` from the context to centralize all save operations.
+    const { addToQueue } = useMetricSaveQueue();
 
     useEffect(() => {
         if (!isEditMode) {
@@ -227,70 +232,59 @@ const FinancialsPage: React.FC = () => {
 
     useEffect(() => { fetchData(); }, [fetchData]);
     
-     const saveParentMetricTotal = useCallback(async (metricId: string, periodId: string, total: number | null) => {
-        try {
-            const { error: upsertError } = await supabase
-                .from('financial_values')
-                .upsert({
+    // FIX: Refactored parent total saving to use the central queue.
+    const handleSaveSuccess = useCallback((metricId: string, periodId: string) => {
+        // This function is called after a subsegment value is successfully saved.
+        // We now update the local state optimistically and queue the parent total save.
+        setMetrics(currentMetrics => {
+            const newMetrics = JSON.parse(JSON.stringify(currentMetrics));
+            const metric = newMetrics.find((m: FinancialMetric) => m.id === metricId);
+            if (!metric || metric.financial_subsegments.length === 0) {
+                return currentMetrics; // Should not happen if called from a subsegment
+            }
+
+            // Recalculate the total for the parent metric for the specific period
+            const total = metric.financial_subsegments.reduce((sum: number, sub: FinancialSubsegment) => {
+                const subVal = sub.financial_values.find((v: FinancialValue) => v.period_id === periodId)?.metric_value || 0;
+                return sum + subVal;
+            }, 0);
+
+            // Update the value in our local state for immediate UI feedback
+            let parentValueUpdated = false;
+            metric.financial_values = metric.financial_values.map((v: FinancialValue) => {
+                if (v.period_id === periodId && v.subsegment_id === null) {
+                    parentValueUpdated = true;
+                    return { ...v, metric_value: total };
+                }
+                return v;
+            });
+            if (!parentValueUpdated) {
+                // If no value existed before, create one locally. The queue will upsert it.
+                metric.financial_values.push({
+                    id: crypto.randomUUID(), // Temp ID for local state
                     stock_id: stockId,
                     metric_id: metricId,
                     period_id: periodId,
                     subsegment_id: null,
-                    value: total,
-                }, { onConflict: 'stock_id,metric_id,period_id,subsegment_id' }); // Assumes composite key exists for upsert
-
-            if (upsertError) throw upsertError;
-        } catch (err) {
-            showToast('error', formatErrorMessage('Failed to save parent total', err));
-        }
-    }, [stockId, showToast]);
-
-    const handleSaveSuccess = useCallback((metricId: string, subsegmentId: string | null, periodId: string, newValue: number | null) => {
-        setMetrics(currentMetrics => {
-            const newMetrics = JSON.parse(JSON.stringify(currentMetrics));
-            const metric = newMetrics.find((m: FinancialMetric) => m.id === metricId);
-            if (!metric) return currentMetrics;
-
-            const target = subsegmentId
-                ? metric.financial_subsegments.find((s: FinancialSubsegment) => s.id === subsegmentId)
-                : metric;
-            if (!target) return currentMetrics;
-            
-            let valueUpdated = false;
-            target.financial_values = target.financial_values.map((v: FinancialValue) => {
-                if (v.period_id === periodId) {
-                    valueUpdated = true;
-                    return { ...v, value: newValue };
-                }
-                return v;
-            });
-            if (!valueUpdated) {
-                target.financial_values.push({ id: crypto.randomUUID(), period_id: periodId, value: newValue });
-            }
-
-            if (subsegmentId) {
-                const total = metric.financial_subsegments.reduce((sum: number, sub: any) => {
-                    const subVal = sub.financial_values.find((v: FinancialValue) => v.period_id === periodId)?.value || 0;
-                    return sum + subVal;
-                }, 0);
-
-                let parentValueUpdated = false;
-                metric.financial_values = metric.financial_values.map((v: FinancialValue) => {
-                    if (v.period_id === periodId && v.subsegment_id === null) {
-                        parentValueUpdated = true;
-                        return { ...v, value: total };
-                    }
-                    return v;
+                    metric_value: total,
                 });
-                if (!parentValueUpdated) {
-                    metric.financial_values.push({ id: crypto.randomUUID(), period_id: periodId, value: total });
-                }
-
-                saveParentMetricTotal(metricId, periodId, total);
             }
+            
+            // Queue the save operation for the parent total.
+            // The debouncing in the queue will handle rapid updates efficiently.
+            const uniqueId = `${stockId}-${metricId}-${periodId}-null`;
+            addToQueue({
+                id: uniqueId,
+                stock_id: stockId,
+                metric_id: metricId,
+                period_id: periodId,
+                subsegment_id: null,
+                metric_value: total,
+            });
+            
             return newMetrics;
         });
-    }, [saveParentMetricTotal]);
+    }, [stockId, addToQueue]);
     
     const handleNameUpdate = async (type: 'metric' | 'sub' | 'period', id: string, newName: string) => {
         const table = type === 'metric' ? 'financial_metric' : type === 'sub' ? 'financial_subsegment' : 'financial_period';
@@ -304,7 +298,7 @@ const FinancialsPage: React.FC = () => {
             return;
         }
 
-        setSaveStatus('saving');
+        showToast('saving', `Updating ${type}...`);
         const { error } = await supabase.from(table).update({ [nameField]: newName }).match({ id });
         if (error) {
             showToast('error', formatErrorMessage(`Failed to update ${type}`, error));
@@ -326,7 +320,7 @@ const FinancialsPage: React.FC = () => {
 
     const addMetric = async () => {
         if (!stockId) return;
-        setSaveStatus('saving');
+        showToast('saving', 'Adding metric...');
         try {
             const { data: newMetricData, error: metricError } = await supabase
                 .from('financial_metric')
@@ -337,14 +331,20 @@ const FinancialsPage: React.FC = () => {
             if (!newMetricData) throw new Error("Failed to get data for new metric.");
     
             if (periods.length > 0) {
-                const newValues = periods.map(period => ({
-                    stock_id: stockId,
-                    metric_id: newMetricData.id,
-                    period_id: period.id,
-                    value: null,
-                }));
-                const { error: valuesError } = await supabase.from('financial_values').insert(newValues);
-                if (valuesError) throw valuesError;
+                const rpcCalls = periods.map(period =>
+                    supabase.rpc("upsert_financial_value", {
+                        p_stock_id: stockId,
+                        p_metric_id: newMetricData.id,
+                        p_period_id: period.id,
+                        p_subsegment_id: null,
+                        p_value: null,
+                    })
+                );
+                const results = await Promise.all(rpcCalls);
+                const firstError = results.find(res => res.error);
+                if (firstError) {
+                    throw firstError.error;
+                }
             }
     
             const newMetric: FinancialMetric = { ...newMetricData, financial_subsegments: [], financial_values: [] };
@@ -360,7 +360,7 @@ const FinancialsPage: React.FC = () => {
         const parentMetric = metrics.find(m => m.id === metric_id);
         if (!parentMetric) return;
     
-        setSaveStatus('saving');
+        showToast('saving', 'Adding sub-segment...');
         try {
             const isFirstSubsegment = parentMetric.financial_subsegments.length === 0;
     
@@ -372,12 +372,24 @@ const FinancialsPage: React.FC = () => {
     
             if (isFirstSubsegment && parentMetric.financial_values.length > 0) {
                 const valuesToMove = parentMetric.financial_values
-                    .filter(v => v.value !== null && v.value !== 0)
-                    .map(({ id, created_at, ...rest }) => ({ ...rest, subsegment_id: newSubData.id }));
+                    .filter(v => v.metric_value !== null && v.metric_value !== 0)
+                    .map(({ id, created_at, updated_at, ...rest }) => ({ ...rest, subsegment_id: newSubData.id }));
                 
                 if (valuesToMove.length > 0) {
-                    const { error: valuesInsertError } = await supabase.from('financial_values').insert(valuesToMove);
-                    if (valuesInsertError) throw valuesInsertError;
+                    const rpcCalls = valuesToMove.map(v =>
+                        supabase.rpc("upsert_financial_value", {
+                            p_stock_id: v.stock_id,
+                            p_metric_id: v.metric_id,
+                            p_period_id: v.period_id,
+                            p_subsegment_id: v.subsegment_id,
+                            p_value: v.metric_value,
+                        })
+                    );
+                    const results = await Promise.all(rpcCalls);
+                    const firstError = results.find(res => res.error);
+                    if (firstError) {
+                        throw firstError.error;
+                    }
                     
                     newSub.financial_values = valuesToMove.map(v => ({...v, id: crypto.randomUUID(), created_at: new Date().toISOString()}));
                 }
@@ -402,20 +414,88 @@ const FinancialsPage: React.FC = () => {
 
     const addPeriod = async () => {
         if (!stockId) return;
-        const newLabel = `Q${(periods.length % 4) + 1} ${new Date().getFullYear() + Math.floor(periods.length / 4)}`;
-        setSaveStatus('saving');
-        const { data, error } = await supabase.from('financial_period').insert({ stock_id: stockId, period_label: newLabel, period_type: 'quarter', display_order: periods.length }).select().single();
-        if (error) { showToast('error', formatErrorMessage('Failed to add period', error)); return; }
-        if (!data) { showToast('error', 'Failed to add period: No data returned from server.'); return; }
-        setPeriods(prev => [...prev, data]);
-        setNewlyAddedId(data.id);
-        showToast('saved', 'Period added successfully');
+    
+        let newLabel = `Q1 ${new Date().getFullYear()}`;
+        const validOrders = periods.map(p => p.display_order).filter(o => typeof o === 'number' && isFinite(o));
+        let newDisplayOrder = 0;
+    
+        if (periods.length > 0 && validOrders.length > 0) {
+            const maxOrder = Math.max(...validOrders);
+            newDisplayOrder = maxOrder + 1;
+            const latestPeriod = periods.find(p => p.display_order === maxOrder);
+            
+            if (latestPeriod) {
+                const match = latestPeriod.period_label.match(/Q(\d)\s+(\d{4})/);
+                if (match) {
+                    let quarter = parseInt(match[1], 10);
+                    let year = parseInt(match[2], 10);
+                    if (quarter >= 4) {
+                        quarter = 1;
+                        year += 1;
+                    } else {
+                        quarter += 1;
+                    }
+                    newLabel = `Q${quarter} ${year}`;
+                }
+            }
+        }
+    
+        showToast('saving', 'Adding period...');
+        try {
+            const periodToUpsert = {
+                // Not providing `id` for new inserts; DB will generate it.
+                stock_id: stockId,
+                period_label: newLabel,
+                period_type: 'quarter' as 'quarter' | 'annual',
+                display_order: newDisplayOrder,
+                updated_at: new Date().toISOString(), // Set timestamp for update on conflict
+            };
+    
+            const { data, error } = await supabase
+                .from('financial_period')
+                .upsert(periodToUpsert, { onConflict: 'stock_id, period_label' })
+                .select()
+                .single();
+    
+            if (error) throw error;
+            if (!data) throw new Error('No data returned from server while adding period.');
+    
+            const newValuesToCreate = metrics.flatMap(metric => {
+                if (metric.financial_subsegments.length > 0) {
+                    return metric.financial_subsegments.map(sub => ({
+                        stock_id: stockId,
+                        metric_id: metric.id,
+                        period_id: data.id,
+                        subsegment_id: sub.id,
+                        metric_value: null
+                    }));
+                }
+                return {
+                    stock_id: stockId,
+                    metric_id: metric.id,
+                    period_id: data.id,
+                    subsegment_id: null,
+                    metric_value: null
+                };
+            });
+    
+            if (newValuesToCreate.length > 0) {
+                const { error: valuesError } = await supabase.from('financial_values').insert(newValuesToCreate);
+                if (valuesError) throw valuesError;
+            }
+    
+            await fetchData(); // Refresh all data to ensure consistency
+            setNewlyAddedId(data.id);
+            showToast('saved', 'Period added successfully');
+        } catch (err) {
+            showToast('error', formatErrorMessage('Failed to add period', err));
+        }
     };
     
     const deleteItem = async (type: 'metric' | 'sub' | 'period', id: string) => {
         if (!window.confirm(`Are you sure you want to delete this ${type}? This cannot be undone.`)) return;
     
-        setSaveStatus('saving');
+        showToast('saving', `Deleting ${type}...`);
         try {
             if (type === 'metric') {
                 const { error } = await supabase.from('financial_metric').delete().eq('id', id);
@@ -466,7 +546,7 @@ const FinancialsPage: React.FC = () => {
         const confirmed = window.confirm(`Are you sure you want to delete ${selectedMetricIds.length} metric(s)? This cannot be undone.`);
         if (!confirmed) return;
         
-        setSaveStatus('saving');
+        showToast('saving', 'Deleting metrics...');
         try {
             const { error } = await supabase
                 .from('financial_metric')
@@ -510,10 +590,10 @@ const FinancialsPage: React.FC = () => {
             metrics.forEach((m: FinancialMetric) => {
                 if (m.financial_subsegments.length > 0) {
                     m.financial_subsegments.forEach((s: FinancialSubsegment) => { 
-                        entry[`subsegment-${s.id}`] = s.financial_values.find(v => v.period_id === p.id)?.value ?? 0; 
+                        entry[`subsegment-${s.id}`] = s.financial_values.find(v => v.period_id === p.id)?.metric_value ?? 0; 
                     });
                 } else {
-                    entry[`metric-${m.id}`] = m.financial_values.find(v => v.period_id === p.id && !v.subsegment_id)?.value ?? 0;
+                    entry[`metric-${m.id}`] = m.financial_values.find(v => v.period_id === p.id && !v.subsegment_id)?.metric_value ?? 0;
                 }
             });
             return entry;
@@ -535,7 +615,7 @@ const FinancialsPage: React.FC = () => {
                     let subTotalForYear = 0;
                     periods.forEach((period: FinancialPeriod) => {
                         if (getYear(period.period_label) === year) {
-                            const val = sub.financial_values.find(v => v.period_id === period.id)?.value || 0;
+                            const val = sub.financial_values.find(v => v.period_id === period.id)?.metric_value || 0;
                             subTotalForYear += val;
                         }
                     });
@@ -545,7 +625,7 @@ const FinancialsPage: React.FC = () => {
                 if (!hasSubsegments) {
                     periods.forEach((period: FinancialPeriod) => {
                         if (getYear(period.period_label) === year) {
-                            const val = metric.financial_values.find(v => v.period_id === period.id && !v.subsegment_id)?.value || 0;
+                            const val = metric.financial_values.find(v => v.period_id === period.id && !v.subsegment_id)?.metric_value || 0;
                             metricTotalForYear += val;
                         }
                     });
@@ -702,13 +782,13 @@ const FinancialsPage: React.FC = () => {
                                                 </div>
                                             </div>
                                         </td>
-                                        {tablePeriods.map(p => <td key={p.id} className="p-1 w-32 text-right pr-3 font-semibold">{metric.financial_subsegments.length > 0 ? (activeTab === 'quarterly' ? valueFormatter(metric.financial_values.find(v => v.period_id === p.id)?.value ?? 0) : valueFormatter(getAnnualValue(metric.id, null, p.period_label))) : (activeTab === 'quarterly' ? <FinancialInput stockId={stockId} metricId={metric.id} periodId={p.id} defaultValue={metric.financial_values.find(v => v.period_id === p.id)?.value ?? null} disabled={!isEditMode} onSaveSuccess={(newValue) => handleSaveSuccess(metric.id, null, p.id, newValue)} /> : <div className="w-full bg-transparent p-2 text-right rounded">{valueFormatter(getAnnualValue(metric.id, null, p.period_label))}</div>)}</td>)}
+                                        {tablePeriods.map(p => <td key={p.id} className="p-1 w-32 text-right pr-3 font-semibold">{metric.financial_subsegments.length > 0 ? (activeTab === 'quarterly' ? valueFormatter(metric.financial_values.find(v => v.period_id === p.id)?.metric_value ?? 0) : valueFormatter(getAnnualValue(metric.id, null, p.period_label))) : (activeTab === 'quarterly' ? <FinancialInput stockId={stockId} metricId={metric.id} periodId={p.id} defaultValue={metric.financial_values.find(v => v.period_id === p.id)?.metric_value ?? null} disabled={!isEditMode} /> : <div className="w-full bg-transparent p-2 text-right rounded">{valueFormatter(getAnnualValue(metric.id, null, p.period_label))}</div>)}</td>)}
                                         {activeTab === 'quarterly' && <td></td>}
                                     </tr>
                                     {metric.financial_subsegments.map(sub => (
                                         <tr key={sub.id} className="hover:bg-accent/20">
                                             <td className="p-2 pl-6 sticky left-0 bg-content z-10 w-52"><EditableHeader id={sub.id} initialValue={sub.subsegment_name} onUpdate={handleNameUpdate.bind(null, 'sub')} onDelete={deleteItem.bind(null, 'sub')} isMetric forceEditMode={isEditMode} isSaving={saveStatus === 'saving'} /></td>
-                                            {tablePeriods.map(p => <td key={p.id} className="p-1 w-32">{activeTab === 'quarterly' ? <FinancialInput stockId={stockId} metricId={metric.id} periodId={p.id} subsegmentId={sub.id} defaultValue={sub.financial_values.find(v => v.period_id === p.id)?.value ?? null} disabled={!isEditMode} onSaveSuccess={(newValue) => handleSaveSuccess(metric.id, sub.id, p.id, newValue)}/> : <div className="w-full bg-transparent p-2 text-right rounded">{valueFormatter(getAnnualValue(metric.id, sub.id, p.period_label))}</div>}</td>)}
+                                            {tablePeriods.map(p => <td key={p.id} className="p-1 w-32">{activeTab === 'quarterly' ? <FinancialInput stockId={stockId} metricId={metric.id} periodId={p.id} subsegmentId={sub.id} defaultValue={sub.financial_values.find(v => v.period_id === p.id)?.metric_value ?? null} disabled={!isEditMode} onSaveSuccess={() => handleSaveSuccess(metric.id, p.id)}/> : <div className="w-full bg-transparent p-2 text-right rounded">{valueFormatter(getAnnualValue(metric.id, sub.id, p.period_label))}</div>}</td>)}
                                             {activeTab === 'quarterly' && <td></td>}
                                         </tr>
                                     ))}
@@ -722,6 +802,14 @@ const FinancialsPage: React.FC = () => {
             </Card>
             <Toast status={saveStatus} message={toastText}/>
         </div>
+    );
+};
+
+const FinancialsPage: React.FC = () => {
+    return (
+        <MetricSaveProvider>
+            <FinancialsPageContent />
+        </MetricSaveProvider>
     );
 };
 

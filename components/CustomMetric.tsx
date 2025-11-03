@@ -10,8 +10,8 @@ import { formatErrorMessage } from '../utils/errorHandler';
 
 // A local, stitched type for the component's state
 interface DisplayMetric extends FinancialMetric {
-  value: number | null;
-  financial_subsegments: (FinancialSubsegment & { value: number | null; })[];
+  metric_value: number | null;
+  financial_subsegments: (FinancialSubsegment & { metric_value: number | null; })[];
 }
 
 interface CustomMetricProps {
@@ -33,50 +33,25 @@ const CustomMetric: React.FC<CustomMetricProps> = ({ stockId, periodId }) => {
     setIsSaving(true);
     setError(null);
     try {
-      const savePromises = payloads.map(async (payload) => {
-        const { stock_id, metric_id, period_id, subsegment_id, value } = payload;
+        const savePromises = payloads.map(async (payload) => {
+            if (!payload.stock_id || !payload.metric_id || !payload.period_id) {
+                console.warn('Skipping save for incomplete payload:', payload);
+                return;
+            }
 
-        if (!stock_id || !metric_id || !period_id) {
-          console.warn('Skipping save for incomplete payload:', payload);
-          return;
-        }
+            const { error } = await supabase.rpc("upsert_financial_value", {
+                p_stock_id: payload.stock_id,
+                p_metric_id: payload.metric_id,
+                p_period_id: payload.period_id,
+                p_subsegment_id: payload.subsegment_id || null,
+                p_value: payload.metric_value,
+            });
+            
+            if (error) throw error;
+        });
 
-        // 1. Check if a value already exists for this unique combination.
-        let query = supabase
-          .from('financial_values')
-          .select('id')
-          .eq('stock_id', stock_id)
-          .eq('metric_id', metric_id)
-          .eq('period_id', period_id);
-
-        if (subsegment_id) {
-          query = query.eq('subsegment_id', subsegment_id);
-        } else {
-          query = query.is('subsegment_id', null);
-        }
-
-        const { data: existing, error: checkError } = await query.maybeSingle();
-        if (checkError) throw checkError;
-
-        // 2. Decide whether to update or insert.
-        if (existing) {
-          // UPDATE the existing record.
-          const { error: updateError } = await supabase
-            .from('financial_values')
-            .update({ value })
-            .eq('id', existing.id);
-          if (updateError) throw updateError;
-        } else if (value !== null && value !== undefined) {
-          // INSERT a new record, but only if there's a value to save.
-          const { error: insertError } = await supabase
-            .from('financial_values')
-            .insert(payload);
-          if (insertError) throw insertError;
-        }
-      });
-
-      await Promise.all(savePromises);
-      console.log('Save successful (manual upsert):', payloads);
+        await Promise.all(savePromises);
+        console.log('Save successful:', payloads);
 
     } catch (err) {
       const message = formatErrorMessage('Save failed', err);
@@ -85,7 +60,7 @@ const CustomMetric: React.FC<CustomMetricProps> = ({ stockId, periodId }) => {
     } finally {
       setIsSaving(false);
     }
-  }, 300), []);
+}, 300), []);
 
 
   const fetchData = useCallback(async () => {
@@ -112,15 +87,15 @@ const CustomMetric: React.FC<CustomMetricProps> = ({ stockId, periodId }) => {
       const stitchedMetrics: DisplayMetric[] = metricsData.map(metric => {
         const subsegments = subsegmentsData.filter(s => s.metric_id === metric.id);
         
-        const metricValue = valuesData.find(v => v.metric_id === metric.id && v.subsegment_id === null)?.value ?? null;
+        const metricValue = valuesData.find(v => v.metric_id === metric.id && v.subsegment_id === null)?.metric_value ?? null;
 
         const subsegmentsWithValues = subsegments.map(sub => {
           // FIX: Correctly match on both metric_id and subsegment_id to find the sub-value.
-          const subValue = valuesData.find(v => v.metric_id === metric.id && v.subsegment_id === sub.id)?.value ?? null;
-          return { ...sub, value: subValue };
+          const subValue = valuesData.find(v => v.metric_id === metric.id && v.subsegment_id === sub.id)?.metric_value ?? null;
+          return { ...sub, metric_value: subValue };
         });
 
-        return { ...metric, value: metricValue, financial_subsegments: subsegmentsWithValues };
+        return { ...metric, metric_value: metricValue, financial_subsegments: subsegmentsWithValues };
       });
 
       setMetrics(stitchedMetrics);
@@ -152,18 +127,18 @@ const CustomMetric: React.FC<CustomMetricProps> = ({ stockId, periodId }) => {
     const payloads: Partial<FinancialValue>[] = [];
 
     if (subsegmentId) {
-      const sub = metric.financial_subsegments.find((s: FinancialSubsegment) => s.id === subsegmentId);
-      if (sub) sub.value = value;
+      const sub = metric.financial_subsegments.find((s: any) => s.id === subsegmentId);
+      if (sub) sub.metric_value = value;
 
-      const total = metric.financial_subsegments.reduce((sum: number, s: { value: number | null }) => sum + (s.value || 0), 0);
-      metric.value = total;
+      const total = metric.financial_subsegments.reduce((sum: number, s: { metric_value: number | null }) => sum + (s.metric_value || 0), 0);
+      metric.metric_value = total;
       
-      payloads.push({ stock_id: stockId, period_id: periodId, metric_id: metricId, subsegment_id: subsegmentId, value });
-      payloads.push({ stock_id: stockId, period_id: periodId, metric_id: metricId, subsegment_id: null, value: total });
+      payloads.push({ stock_id: stockId, period_id: periodId, metric_id: metricId, subsegment_id: subsegmentId, metric_value: value });
+      payloads.push({ stock_id: stockId, period_id: periodId, metric_id: metricId, subsegment_id: null, metric_value: total });
 
     } else {
-      metric.value = value;
-      payloads.push({ stock_id: stockId, period_id: periodId, metric_id: metricId, subsegment_id: null, value });
+      metric.metric_value = value;
+      payloads.push({ stock_id: stockId, period_id: periodId, metric_id: metricId, subsegment_id: null, metric_value: value });
     }
 
     setMetrics(newMetrics);
@@ -194,16 +169,20 @@ const CustomMetric: React.FC<CustomMetricProps> = ({ stockId, periodId }) => {
         // Step 3: Create a placeholder `financial_values` record for each period.
         // This ensures that when a value is entered, we are UPDATING an existing row.
         if (periodsData && periodsData.length > 0) {
-            const newValues = periodsData.map(period => ({
-                stock_id: stockId,
-                metric_id: newMetricData.id,
-                period_id: period.id,
-                value: null,
-            }));
-            const { error: valuesError } = await supabase
-                .from('financial_values')
-                .insert(newValues);
-            if (valuesError) throw valuesError;
+            const rpcCalls = periodsData.map(period =>
+                supabase.rpc("upsert_financial_value", {
+                    p_stock_id: stockId,
+                    p_metric_id: newMetricData.id,
+                    p_period_id: period.id,
+                    p_subsegment_id: null,
+                    p_value: null,
+                })
+            );
+            const results = await Promise.all(rpcCalls);
+            const firstError = results.find(res => res.error);
+            if (firstError) {
+                throw firstError.error;
+            }
         }
 
         setNewMetricName('');
@@ -253,7 +232,7 @@ const CustomMetric: React.FC<CustomMetricProps> = ({ stockId, periodId }) => {
               <span className="font-semibold flex-1">{metric.metric_name}</span>
               <input
                 type="number"
-                value={metric.value ?? ''}
+                value={metric.metric_value ?? ''}
                 onChange={(e) => handleValueChange(metric.id, null, e.target.value)}
                 disabled={metric.financial_subsegments.length > 0}
                 placeholder="Value"
@@ -267,7 +246,7 @@ const CustomMetric: React.FC<CustomMetricProps> = ({ stockId, periodId }) => {
                     <span className="text-text-secondary flex-1">{sub.subsegment_name}</span>
                     <input
                       type="number"
-                      value={sub.value ?? ''}
+                      value={sub.metric_value ?? ''}
                       onChange={(e) => handleValueChange(metric.id, sub.id, e.target.value)}
                       placeholder="Value"
                       className="w-32 bg-accent p-1 rounded text-right border border-gray-600 focus:ring-primary focus:border-primary"

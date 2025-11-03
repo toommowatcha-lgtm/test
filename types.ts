@@ -67,8 +67,9 @@ export interface FinancialValue {
   metric_id: string; // UUID
   subsegment_id: string | null; // UUID
   period_id: string; // UUID
-  value: number | null;
+  metric_value: number | null;
   created_at?: string;
+  updated_at?: string;
 }
 
 export interface FinancialSubsegment {
@@ -160,4 +161,28 @@ export interface Dividend {
 export interface SparklineData {
   date: string;
   value: number;
+}
+
+// --- Save Queue Types ---
+export type SaveStatus = 'idle' | 'queued' | 'saving' | 'saved' | 'retrying' | 'error';
+
+export interface SavePayload {
+  id: string; // Unique identifier for the input field, e.g., `${metricId}-${periodId}`
+  stock_id: string;
+  metric_id: string;
+  period_id: string;
+  subsegment_id: string | null;
+  metric_value: number | null;
+}
+
+export interface QueueItem {
+  payload: SavePayload;
+  retries: number;
+  // Callback to execute on successful save, e.g., for recalculating totals.
+  onSaveSuccess?: (newValue: number | null) => void;
+}
+
+export interface SaveStatusInfo {
+  status: SaveStatus;
+  error?: string;
 }
