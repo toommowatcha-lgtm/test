@@ -84,37 +84,32 @@ export async function ensurePeriodExistsAndLink({
       .select('id, stock_id')
       .eq('period_label', periodLabel)
       .eq('period_type', periodType)
+      .eq('stock_id', stockId)
       .maybeSingle();
 
     if (checkError) throw checkError;
 
-    if (existingPeriod && existingPeriod?.stock_id !== stockId) {
-      return {
-        ok: false,
-        error: {
-          message:
-            'A period with this name already exists for another stock due to a global constraint. Rename the period or remove the global constraint in database.',
-        },
-      };
-    }
+    let period = existingPeriod;
 
-    const { data: period, error: upsertError } = await supabase
-      .from('financial_period')
-      .upsert(
-        {
+    if (!existingPeriod) {
+      const { data: inserted, error: insertError } = await supabase
+        .from('financial_period')
+        .insert({
           stock_id: stockId,
           period_label: periodLabel,
           period_type: periodType,
           display_order: extractYearFromLabel(periodLabel),
           updated_at: new Date().toISOString(),
-        },
-        { onConflict: 'stock_id, period_label, period_type' }
-      )
-      .select()
-      .single();
+        })
+        .onConflict('stock_id,period_label,period_type')
+        .select()
+        .single();
 
-    if (upsertError) throw upsertError;
-    if (!period) throw new Error('Upsert did not return a period row');
+      if (insertError) throw insertError;
+      if (!inserted) throw new Error('Period insert returned no data');
+
+      period = inserted;
+    }
 
     await createPlaceholderValuesForPeriod(stockId, period.id, metrics);
 
