@@ -125,7 +125,7 @@ export async function ensurePeriodExistsAndLink({
                     updated_at: new Date().toISOString(),
                 },
                 {
-                    onConflict: 'stock_id, period_label, period_type', // Per-stock unique constraint
+                    onConflict: ['stock_id, period_label, period_type'], // Per-stock unique constraint
                 }
             )
             .select()
