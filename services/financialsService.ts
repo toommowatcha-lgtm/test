@@ -3,39 +3,34 @@ import { formatErrorMessage } from '../utils/errorHandler';
 import { FinancialPeriod, FinancialMetric, SavePayload } from '../types';
 
 /**
- * Saves or updates a single financial value.
+ * Save or update a single financial value row.
+ * Manual upsert logic (v2 no longer supports `.onConflict()` on insert)
  */
 export async function saveFinancialValue(payload: SavePayload) {
   const { stock_id, metric_id, period_id, subsegment_id, metric_value } = payload;
 
-  let selectQuery = supabase
+  let query = supabase
     .from('financial_values')
     .select('id')
     .eq('stock_id', stock_id)
     .eq('metric_id', metric_id)
     .eq('period_id', period_id);
 
-  if (subsegment_id) {
-    selectQuery = selectQuery.eq('subsegment_id', subsegment_id);
-  } else {
-    selectQuery = selectQuery.is('subsegment_id', null);
-  }
+  if (subsegment_id) query = query.eq('subsegment_id', subsegment_id);
+  else query = query.is('subsegment_id', null);
 
-  const { data: existing, error: selectError } = await selectQuery.maybeSingle();
+  const { data: existing, error: selectError } = await query.maybeSingle();
   if (selectError) throw selectError;
 
   if (existing) {
-    const { error: updateError } = await supabase
+    const { error } = await supabase
       .from('financial_values')
-      .update({
-        metric_value,
-        updated_at: new Date().toISOString(),
-      })
+      .update({ metric_value, updated_at: new Date().toISOString() })
       .eq('id', existing.id);
 
-    if (updateError) throw updateError;
+    if (error) throw error;
   } else {
-    const { error: insertError } = await supabase.from('financial_values').insert({
+    const { error } = await supabase.from('financial_values').insert({
       stock_id,
       metric_id,
       period_id,
@@ -43,7 +38,7 @@ export async function saveFinancialValue(payload: SavePayload) {
       metric_value,
     });
 
-    if (insertError) throw insertError;
+    if (error) throw error;
   }
 }
 
@@ -60,13 +55,14 @@ interface EnsurePeriodResult {
   error?: { message: string };
 }
 
-const extractYearFromLabel = (label: string): number => {
+const getYear = (label: string): number => {
   const match = label.match(/\b(\d{4})\b/);
   return match ? parseInt(match[1], 10) : new Date().getFullYear();
 };
 
 /**
- * Creates or ensures a period exists & links all existing metrics.
+ * Creates or updates a period safely, then links all metrics.
+ * ✅ Fully compatible with Supabase JS v2
  */
 export async function ensurePeriodExistsAndLink({
   stockId,
@@ -84,32 +80,39 @@ export async function ensurePeriodExistsAndLink({
       .select('id, stock_id')
       .eq('period_label', periodLabel)
       .eq('period_type', periodType)
-      .eq('stock_id', stockId)
       .maybeSingle();
 
     if (checkError) throw checkError;
 
-    let period = existingPeriod;
+    if (existingPeriod && existingPeriod.stock_id !== stockId) {
+      return {
+        ok: false,
+        error: {
+          message:
+            'A period with this name already exists for another stock. Due to DB unique constraint, rename period or change DB schema.',
+        },
+      };
+    }
 
-    if (!existingPeriod) {
-      const { data: inserted, error: insertError } = await supabase
-        .from('financial_period')
-        .insert({
+    const { data: period, error: upsertError } = await supabase
+      .from('financial_period')
+      .upsert(
+        {
           stock_id: stockId,
           period_label: periodLabel,
           period_type: periodType,
-          display_order: extractYearFromLabel(periodLabel),
+          display_order: getYear(periodLabel),
           updated_at: new Date().toISOString(),
-        })
-        .onConflict('stock_id,period_label,period_type')
-        .select()
-        .single();
+        },
+        {
+          onConflict: 'stock_id,period_label,period_type',
+        }
+      )
+      .select()
+      .single();
 
-      if (insertError) throw insertError;
-      if (!inserted) throw new Error('Period insert returned no data');
-
-      period = inserted;
-    }
+    if (upsertError) throw upsertError;
+    if (!period) throw new Error('Upsert did not return a row');
 
     await createPlaceholderValuesForPeriod(stockId, period.id, metrics);
 
@@ -123,40 +126,39 @@ export async function ensurePeriodExistsAndLink({
 }
 
 /**
- * Ensures placeholder values exist for all metrics/subsegments for new period.
+ * Auto create placeholder values for new period.
  */
 async function createPlaceholderValuesForPeriod(
   stockId: string,
   periodId: string,
   metrics: FinancialMetric[]
 ) {
-  if (!metrics || metrics.length === 0) return;
+  if (!metrics?.length) return;
 
-  const placeholders = metrics.flatMap((metric) => {
-    const hasSubsegments = metric.financial_subsegments?.length > 0;
-
-    const placeholderRows = hasSubsegments
-      ? metric.financial_subsegments.map((sub) => ({
+  const rows = metrics.flatMap((m) => {
+    const subRows = m.financial_subsegments?.length
+      ? m.financial_subsegments.map((s) => ({
           stock_id: stockId,
-          metric_id: metric.id,
+          metric_id: m.id,
           period_id: periodId,
-          subsegment_id: sub.id,
+          subsegment_id: s.id,
           metric_value: null,
         }))
       : [];
 
-    placeholderRows.push({
-      stock_id: stockId,
-      metric_id: metric.id,
-      period_id: periodId,
-      subsegment_id: null,
-      metric_value: null,
-    });
-
-    return placeholderRows;
+    return [
+      ...subRows,
+      {
+        stock_id: stockId,
+        metric_id: m.id,
+        period_id: periodId,
+        subsegment_id: null,
+        metric_value: null,
+      },
+    ];
   });
 
-  for (const row of placeholders) {
+  for (const row of rows) {
     await saveFinancialValue({ ...row, id: '' });
   }
 }
