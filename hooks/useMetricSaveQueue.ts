@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useCallback, useRef, createContext, useContext, ReactNode } from 'react';
-import { supabase } from '../services/supabaseClient';
 import { debounce } from 'lodash';
-import { SavePayload, QueueItem, SaveStatus, SaveStatusInfo } from '../types';
+import { SavePayload, QueueItem, SaveStatusInfo } from '../types';
 import { formatErrorMessage } from '../utils/errorHandler';
+import { saveFinancialValue } from '../services/financialsService';
 
 const QUEUE_STORAGE_KEY = 'financialsSaveQueue';
 const MAX_RETRIES = 3;
@@ -15,7 +15,6 @@ interface MetricSaveQueueContextType {
 
 const MetricSaveQueueContext = createContext<MetricSaveQueueContextType | undefined>(undefined);
 
-// FIX: Explicitly type MetricSaveProvider as a React.FC to help TypeScript's JSX parser.
 export const MetricSaveProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
   const [queue, setQueue] = useState<QueueItem[]>([]);
   const [statuses, setStatuses] = useState<Record<string, SaveStatusInfo>>({});
@@ -81,15 +80,7 @@ export const MetricSaveProvider: React.FC<{ children: ReactNode }> = ({ children
     setStatuses(prev => ({ ...prev, [payload.id]: { status: retries > 0 ? 'retrying' : 'saving' } }));
 
     try {
-      const { error } = await supabase.rpc("upsert_financial_value", {
-        p_stock_id: payload.stock_id,
-        p_metric_id: payload.metric_id,
-        p_period_id: payload.period_id,
-        p_subsegment_id: payload.subsegment_id,
-        p_value: payload.metric_value,
-      });
-
-      if (error) throw error;
+      await saveFinancialValue(payload);
       
       // Success
       setStatuses(prev => ({ ...prev, [payload.id]: { status: 'saved' } }));
@@ -175,7 +166,6 @@ export const MetricSaveProvider: React.FC<{ children: ReactNode }> = ({ children
 
   const contextValue = { addToQueue, getSaveStatus };
 
-  // FIX: Replaced JSX with React.createElement to avoid syntax errors in a .ts file.
   return React.createElement(
     MetricSaveQueueContext.Provider,
     { value: contextValue },

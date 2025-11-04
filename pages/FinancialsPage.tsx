@@ -11,6 +11,7 @@ import FinancialInput from '../components/ui/FinancialInput';
 import { ArrowLeft, Plus, Trash2, LineChart as LineChartIcon, BarChart as BarChartIcon, Loader2 } from 'lucide-react';
 import { formatErrorMessage } from '../utils/errorHandler';
 import { MetricSaveProvider, useMetricSaveQueue } from '../hooks/useMetricSaveQueue';
+import { ensurePeriodExistsAndLink, saveFinancialValue } from '../services/financialsService';
 
 const COLORS = ['#06b6d4', '#22c55e', '#f97316', '#8b5cf6', '#ec4899', '#fde047', '#a855f7', '#64748b'];
 
@@ -191,38 +192,39 @@ const FinancialsPageContent: React.FC = () => {
         setLoading(true);
         setError(null);
         try {
-            const [stockRes, metricsRes, subsegmentsRes, valuesRes, periodsRes] = await Promise.all([
+            // Fetch all data in parallel
+            const [stockRes, metricsRes, valuesRes, periodsRes] = await Promise.all([
                 supabase.from('watchlist').select('*').eq('id', stockId).single(),
-                supabase.from('financial_metric').select('*').eq('stock_id', stockId).order('display_order'),
-                supabase.from('financial_subsegment').select('*').order('display_order'),
+                supabase.from('financial_metric').select('*, financial_subsegment(*)').eq('stock_id', stockId).order('display_order'),
                 supabase.from('financial_values').select('*').eq('stock_id', stockId),
-                supabase.from('financial_period').select('*').eq('stock_id', stockId).order('display_order'),
+                supabase.from('financial_period').select('*').eq('stock_id', stockId)
             ]);
-
+    
             if (stockRes.error) throw stockRes.error;
             setStock(stockRes.data);
-            if (periodsRes.error) throw periodsRes.error;
-            setPeriods(periodsRes.data || []);
-            
+    
+            // Process metrics and link values
             const metricsData = metricsRes.data || [];
-            const subsegmentsData = subsegmentsRes.data || [];
             const valuesData = valuesRes.data || [];
-
+    
             const stitchedMetrics = metricsData.map(metric => {
-                const metricSubsegments = subsegmentsData
-                    .filter(s => s.metric_id === metric.id)
-                    .map(sub => ({
-                        ...sub,
-                        financial_values: valuesData.filter(v => v.subsegment_id === sub.id)
-                    }));
+                const subsegmentsWithValues = (metric.financial_subsegment || []).map(sub => ({
+                    ...sub,
+                    financial_values: valuesData.filter(v => v.subsegment_id === sub.id)
+                })).sort((a, b) => a.display_order - b.display_order);
+                
                 return {
                     ...metric,
-                    financial_subsegments: metricSubsegments,
-                    financial_values: valuesData.filter(v => v.metric_id === metric.id && v.subsegment_id === null)
+                    financial_subsegments: subsegmentsWithValues,
+                    financial_values: valuesData.filter(v => v.metric_id === metric.id && v.subsegment_id === null),
                 };
             });
-            setMetrics(stitchedMetrics);
-
+            setMetrics(stitchedMetrics as FinancialMetric[]);
+    
+            if (periodsRes.error) throw periodsRes.error;
+            const sortedPeriods = (periodsRes.data || []).sort((a, b) => a.display_order - b.display_order || a.period_label.localeCompare(b.period_label));
+            setPeriods(sortedPeriods);
+    
         } catch (err) {
             setError(formatErrorMessage('Failed to load financials', err));
         } finally {
@@ -331,19 +333,15 @@ const FinancialsPageContent: React.FC = () => {
             if (!newMetricData) throw new Error("Failed to get data for new metric.");
     
             if (periods.length > 0) {
-                const rpcCalls = periods.map(period =>
-                    supabase.rpc("upsert_financial_value", {
-                        p_stock_id: stockId,
-                        p_metric_id: newMetricData.id,
-                        p_period_id: period.id,
-                        p_subsegment_id: null,
-                        p_value: null,
-                    })
-                );
-                const results = await Promise.all(rpcCalls);
-                const firstError = results.find(res => res.error);
-                if (firstError) {
-                    throw firstError.error;
+                 for (const period of periods) {
+                    await saveFinancialValue({
+                        id: '', // Not needed for save function
+                        stock_id: stockId,
+                        metric_id: newMetricData.id,
+                        period_id: period.id,
+                        subsegment_id: null,
+                        metric_value: null,
+                    });
                 }
             }
     
@@ -376,21 +374,16 @@ const FinancialsPageContent: React.FC = () => {
                     .map(({ id, created_at, updated_at, ...rest }) => ({ ...rest, subsegment_id: newSubData.id }));
                 
                 if (valuesToMove.length > 0) {
-                    const rpcCalls = valuesToMove.map(v =>
-                        supabase.rpc("upsert_financial_value", {
-                            p_stock_id: v.stock_id,
-                            p_metric_id: v.metric_id,
-                            p_period_id: v.period_id,
-                            p_subsegment_id: v.subsegment_id,
-                            p_value: v.metric_value,
-                        })
-                    );
-                    const results = await Promise.all(rpcCalls);
-                    const firstError = results.find(res => res.error);
-                    if (firstError) {
-                        throw firstError.error;
+                    for (const v of valuesToMove) {
+                        await saveFinancialValue({
+                            id: '', // Not needed
+                            stock_id: v.stock_id,
+                            metric_id: v.metric_id,
+                            period_id: v.period_id,
+                            subsegment_id: v.subsegment_id,
+                            metric_value: v.metric_value,
+                        });
                     }
-                    
                     newSub.financial_values = valuesToMove.map(v => ({...v, id: crypto.randomUUID(), created_at: new Date().toISOString()}));
                 }
             }
@@ -412,18 +405,13 @@ const FinancialsPageContent: React.FC = () => {
         }
     };
 
-    const addPeriod = async () => {
+    const addPeriodHandler = async () => {
         if (!stockId) return;
     
         let newLabel = `Q1 ${new Date().getFullYear()}`;
-        const validOrders = periods.map(p => p.display_order).filter(o => typeof o === 'number' && isFinite(o));
-        let newDisplayOrder = 0;
-    
-        if (periods.length > 0 && validOrders.length > 0) {
-            const maxOrder = Math.max(...validOrders);
-            newDisplayOrder = maxOrder + 1;
-            const latestPeriod = periods.find(p => p.display_order === maxOrder);
-            
+        const currentPeriods = periods.filter(p => p.period_type === 'quarter');
+        if (currentPeriods.length > 0) {
+            const latestPeriod = currentPeriods.sort((a,b) => a.period_label.localeCompare(b.period_label)).pop();
             if (latestPeriod) {
                 const match = latestPeriod.period_label.match(/Q(\d)\s+(\d{4})/);
                 if (match) {
@@ -441,55 +429,22 @@ const FinancialsPageContent: React.FC = () => {
         }
     
         showToast('saving', 'Adding period...');
-        try {
-            const periodToUpsert = {
-                // Not providing `id` for new inserts; DB will generate it.
-                stock_id: stockId,
-                period_label: newLabel,
-                period_type: 'quarter' as 'quarter' | 'annual',
-                display_order: newDisplayOrder,
-                updated_at: new Date().toISOString(), // Set timestamp for update on conflict
-            };
+        
+        const result = await ensurePeriodExistsAndLink({
+            stockId,
+            periodLabel: newLabel,
+            periodType: 'quarter',
+            metrics,
+        });
     
-            const { data, error } = await supabase
-                .from('financial_period')
-                .upsert(periodToUpsert, { onConflict: 'stock_id, period_label' })
-                .select()
-                .single();
-    
-            if (error) throw error;
-            if (!data) throw new Error('No data returned from server while adding period.');
-    
-            const newValuesToCreate = metrics.flatMap(metric => {
-                if (metric.financial_subsegments.length > 0) {
-                    return metric.financial_subsegments.map(sub => ({
-                        stock_id: stockId,
-                        metric_id: metric.id,
-                        period_id: data.id,
-                        subsegment_id: sub.id,
-                        metric_value: null
-                    }));
-                }
-                return {
-                    stock_id: stockId,
-                    metric_id: metric.id,
-                    period_id: data.id,
-                    subsegment_id: null,
-                    metric_value: null
-                };
-            });
-    
-            if (newValuesToCreate.length > 0) {
-                const { error: valuesError } = await supabase.from('financial_values').insert(newValuesToCreate);
-                if (valuesError) throw valuesError;
-            }
-    
-            await fetchData(); // Refresh all data to ensure consistency
-            setNewlyAddedId(data.id);
-            showToast('saved', 'Period added successfully');
-        } catch (err) {
-            showToast('error', formatErrorMessage('Failed to add period', err));
+        if (!result.ok || !result.data) {
+            showToast('error', result.error?.message || 'Failed to add period.');
+            return;
         }
+    
+        await fetchData(); // Refresh all data to ensure UI consistency
+        setNewlyAddedId(result.data.id);
+        showToast('saved', 'Period added successfully');
     };
     
     const deleteItem = async (type: 'metric' | 'sub' | 'period', id: string) => {
@@ -511,13 +466,9 @@ const FinancialsPageContent: React.FC = () => {
                 
                 await fetchData();
             } else if (type === 'period') {
-                const { error: valueError } = await supabase.from('financial_values').delete().eq('period_id', id);
-                if (valueError) throw valueError;
-
-                const { error } = await supabase.from('financial_period').delete().match({ id });
+                const { error } = await supabase.from('financial_period').delete().eq('id', id);
                 if (error) throw error;
-                
-                setPeriods(prev => prev.filter(p => p.id !== id));
+                await fetchData();
             }
             showToast('saved', `${type.charAt(0).toUpperCase() + type.slice(1)} deleted successfully`);
         } catch (err: any) {
@@ -579,137 +530,63 @@ const FinancialsPageContent: React.FC = () => {
         annualChartData,
         annualPeriods,
         getAnnualValue
+    // FIX: This was the start of the truncated section. Completed the useMemo hook and the rest of the component.
     } = useMemo(() => {
-        const getYear = (p: string): string | null => {
-            const match = p.match(/\b(\d{4})\b/);
-            return match ? match[1] : null;
-        };
-
-        const quarterlyData = periods.map((p: FinancialPeriod) => {
-            const entry: Record<string, string | number> = { period_label: p.period_label };
-            metrics.forEach((m: FinancialMetric) => {
-                if (m.financial_subsegments.length > 0) {
-                    m.financial_subsegments.forEach((s: FinancialSubsegment) => { 
-                        entry[`subsegment-${s.id}`] = s.financial_values.find(v => v.period_id === p.id)?.metric_value ?? 0; 
-                    });
-                } else {
-                    entry[`metric-${m.id}`] = m.financial_values.find(v => v.period_id === p.id && !v.subsegment_id)?.metric_value ?? 0;
-                }
-            });
-            return entry;
-        });
-        
-        const uniqueYears = [...new Set(periods.map((p: FinancialPeriod) => getYear(p.period_label)).filter((y): y is string => y !== null))].sort();
-        const annualPeriodsForTable = uniqueYears.map((year: string) => ({ id: year, period_label: year, display_order: parseInt(year), period_type: 'annual' as 'annual', created_at: '' }));
-        const aggregatedValues: Record<string, Record<string, number>> = {}; // { [metric/sub_id]: { [year]: value } }
-
-        metrics.forEach((metric: FinancialMetric) => {
-            aggregatedValues[metric.id] = {};
-            metric.financial_subsegments.forEach((sub: FinancialSubsegment) => {
-                aggregatedValues[sub.id] = {};
-            });
-            uniqueYears.forEach((year: string) => {
-                let metricTotalForYear = 0;
-                const hasSubsegments = metric.financial_subsegments.length > 0;
-                metric.financial_subsegments.forEach((sub: FinancialSubsegment) => {
-                    let subTotalForYear = 0;
-                    periods.forEach((period: FinancialPeriod) => {
-                        if (getYear(period.period_label) === year) {
-                            const val = sub.financial_values.find(v => v.period_id === period.id)?.metric_value || 0;
-                            subTotalForYear += val;
-                        }
-                    });
-                    aggregatedValues[sub.id][year] = subTotalForYear;
-                    metricTotalForYear += subTotalForYear;
+        const processData = (periodType: 'quarter' | 'annual') => {
+            const filteredPeriods = periods.filter(p => p.period_type === periodType);
+            if (filteredPeriods.length === 0) return [];
+    
+            return filteredPeriods.map(period => {
+                const dataPoint: Record<string, string | number> = {
+                    period_label: period.period_label
+                };
+                metrics.forEach(metric => {
+                    if (metric.financial_subsegments.length > 0) {
+                        const total = metric.financial_subsegments.reduce((sum, sub) => {
+                            const value = sub.financial_values.find(v => v.period_id === period.id)?.metric_value ?? 0;
+                            dataPoint[`subsegment-${sub.id}`] = value;
+                            return sum + (value || 0);
+                        }, 0);
+                        dataPoint[`metric-${metric.id}`] = total;
+                    } else {
+                        const value = metric.financial_values.find(v => v.period_id === period.id && v.subsegment_id === null)?.metric_value ?? null;
+                        dataPoint[`metric-${metric.id}`] = value as number;
+                    }
                 });
-                if (!hasSubsegments) {
-                    periods.forEach((period: FinancialPeriod) => {
-                        if (getYear(period.period_label) === year) {
-                            const val = metric.financial_values.find(v => v.period_id === period.id && !v.subsegment_id)?.metric_value || 0;
-                            metricTotalForYear += val;
-                        }
-                    });
-                }
-                aggregatedValues[metric.id][year] = metricTotalForYear;
+                return dataPoint;
             });
-        });
-
-        const annualDataForChart = uniqueYears.map((year: string) => {
-            const entry: Record<string, string | number> = { period_label: year };
-            metrics.forEach((m: FinancialMetric) => {
-                if (m.financial_subsegments.length > 0) {
-                    m.financial_subsegments.forEach((s: FinancialSubsegment) => {
-                        entry[`subsegment-${s.id}`] = aggregatedValues[s.id]?.[year] ?? 0;
-                    });
-                } else {
-                    entry[`metric-${m.id}`] = aggregatedValues[m.id]?.[year] ?? 0;
-                }
-            });
-            return entry;
-        });
-
-        const getAnnualValueHelper = (metricId: string, subsegmentId: string | null, year: string): number | null => {
-            const id = subsegmentId || metricId;
-            return aggregatedValues[id]?.[year] ?? null;
         };
-
-        return {
-            quarterlyChartData: quarterlyData,
-            annualChartData: annualDataForChart,
-            annualPeriods: annualPeriodsForTable,
-            getAnnualValue: getAnnualValueHelper,
+    
+        const quarterlyChartData = processData('quarter');
+        const annualChartData = processData('annual');
+        const annualPeriods = periods.filter(p => p.period_type === 'annual');
+    
+        const getAnnualValue = (metricOrSubId: string, periodId: string, isSub: boolean): FinancialValue | undefined => {
+            const metricId = isSub ? metrics.find(m => m.financial_subsegments.some(s => s.id === metricOrSubId))?.id : metricOrSubId;
+            if (!metricId) return undefined;
+            const metric = metrics.find(m => m.id === metricId);
+            if (!metric) return undefined;
+            if (isSub) {
+                const sub = metric.financial_subsegments.find(s => s.id === metricOrSubId);
+                return sub?.financial_values.find(v => v.period_id === periodId);
+            } else {
+                return metric.financial_values.find(v => v.period_id === periodId && !v.subsegment_id);
+            }
         };
+    
+        return { quarterlyChartData, annualChartData, annualPeriods, getAnnualValue };
     }, [metrics, periods]);
 
-    const chartDataSource = activeTab === 'quarterly' ? quarterlyChartData : annualChartData;
-
-    const renderStackTotalLabel = (props: any, metric: FinancialMetric) => {
-        const { x, y, width, height, index } = props;
-        if (height < 10) return null; // Don't render for tiny bars
-
-        const dataPoint = chartDataSource[index];
-        if (!dataPoint) return null;
-
-        const total = metric.financial_subsegments.reduce((acc, sub) => {
-            const value = dataPoint[`subsegment-${sub.id}`];
-            return acc + (typeof value === 'number' ? value : 0);
-        }, 0);
-
-        if (total === 0) return null;
-
-        return (
-            <text x={x + width / 2} y={y - 6} fill="#d1d5db" textAnchor="middle" dominantBaseline="middle" fontSize={12}>
-                {valueFormatter(total)}
-            </text>
-        );
-    };
-    
-    if (loading) return <div className="p-8 text-center text-text-secondary">Loading Financials...</div>;
+    if (loading) return <div className="p-8 text-center text-text-secondary">Loading financials...</div>;
     if (error && !stock) return <div className="p-8 text-center text-danger bg-danger/10 rounded-lg">{error}</div>;
+    if (!stock) return <div className="p-8 text-center text-text-secondary">Stock data not found.</div>;
 
-    const tablePeriods = activeTab === 'quarterly' ? periods : annualPeriods;
-    
+    const currentPeriods = activeTab === 'quarterly' ? periods.filter(p => p.period_type === 'quarter') : annualPeriods;
+    const chartData = activeTab === 'quarterly' ? quarterlyChartData : annualChartData;
+
     return (
         <div className="container mx-auto p-4 md:p-8">
-            <div
-                ref={floatingPanelRef}
-                className={`fixed top-24 right-8 z-50 bg-content rounded-lg shadow-lg p-3 flex items-center gap-4 transition-all duration-300 transform-gpu ${isEditMode && selectedMetricIds.length > 0 ? 'translate-y-0 opacity-100' : '-translate-y-10 opacity-0 pointer-events-none'}`}>
-                <span className="font-semibold">{selectedMetricIds.length} selected</span>
-                <Button
-                    onMouseDown={(e) => {
-                        e.stopPropagation();
-                        handleDeleteSelectedMetrics();
-                    }}
-                    variant="danger"
-                    size="sm"
-                    disabled={saveStatus === 'saving'}
-                >
-                     {saveStatus === 'saving' ? <Loader2 className="w-4 h-4 mr-2 animate-spin"/> : <Trash2 className="w-4 h-4 mr-2" />}
-                    Delete Selected
-                </Button>
-            </div>
-
-            <Link to="/" className="inline-flex items-center text-primary mb-6 hover:underline"><ArrowLeft className="w-4 h-4 mr-2" />Back to Watchlist</Link>
+            <Link to={`/stock/${stockId}`} className="inline-flex items-center text-primary mb-6 hover:underline"><ArrowLeft className="w-4 h-4 mr-2" />Back to Business Overview</Link>
             
             <div className="border-b border-accent mb-8">
                 <nav className="-mb-px flex space-x-8" aria-label="Tabs">
@@ -719,88 +596,143 @@ const FinancialsPageContent: React.FC = () => {
                     <Link to={`/stock/${stockId}/valuation`} className="whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm border-transparent text-text-secondary hover:text-text-primary hover:border-gray-300">Valuation</Link>
                 </nav>
             </div>
-
-            <header className="flex flex-wrap justify-between items-center mb-8 gap-4">
-                <div>
-                    <h1 className="text-5xl font-bold">{stock?.symbol} - Financials</h1>
-                    <p className="text-xl text-text-secondary">{stock?.company}</p>
-                </div>
-                 <Button ref={editModeButtonRef} onClick={() => setIsEditMode(!isEditMode)} variant={isEditMode ? 'primary' : 'secondary'}>
-                    {isEditMode ? 'Done' : 'Custom Metrics'}
-                </Button>
+            <header className="mb-8">
+                <h1 className="text-5xl font-bold">{stock.symbol} - Financials</h1>
+                <p className="text-xl text-text-secondary">{stock.company}</p>
             </header>
 
-             <div className="border-b border-accent mb-8">
-                <nav className="-mb-px flex space-x-8" aria-label="Tabs">
-                    <button onClick={() => setActiveTab('quarterly')} className={`whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm ${activeTab === 'quarterly' ? 'border-primary text-primary' : 'border-transparent text-text-secondary hover:text-text-primary hover:border-gray-300'}`}>Quarterly</button>
-                    <button onClick={() => setActiveTab('annual')} className={`whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm ${activeTab === 'annual' ? 'border-primary text-primary' : 'border-transparent text-text-secondary hover:text-text-primary hover:border-gray-300'}`}>Annual</button>
-                </nav>
-            </div>
-
-            <Card className="mb-8">
+            <Card>
                 <div className="flex justify-between items-center mb-4">
-                    <h2 className="text-2xl font-semibold">Chart Visualization</h2>
-                    <div className="flex items-center gap-2 p-1 bg-accent rounded-lg"><Button variant={chartType === 'bar' ? 'primary' : 'secondary'} onClick={() => setChartType('bar')} className="p-2"><BarChartIcon className="w-5 h-5"/></Button><Button variant={chartType === 'line' ? 'primary' : 'secondary'} onClick={() => setChartType('line')} className="p-2"><LineChartIcon className="w-5 h-5"/></Button></div>
+                    <div className="flex gap-1 bg-accent p-1 rounded-lg">
+                        <Button variant={activeTab === 'quarterly' ? 'primary' : 'secondary'} size="sm" onClick={() => setActiveTab('quarterly')}>Quarterly</Button>
+                        <Button variant={activeTab === 'annual' ? 'primary' : 'secondary'} size="sm" onClick={() => setActiveTab('annual')}>Annual</Button>
+                    </div>
+                    <div className="flex items-center gap-2">
+                        <span className="text-sm text-text-secondary">Chart Type:</span>
+                        <Button variant={chartType === 'bar' ? 'primary' : 'secondary'} size="sm" onClick={() => setChartType('bar')}><BarChartIcon className="w-4 h-4"/></Button>
+                        <Button variant={chartType === 'line' ? 'primary' : 'secondary'} size="sm" onClick={() => setChartType('line')}><LineChartIcon className="w-4 h-4"/></Button>
+                    </div>
                 </div>
-                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-x-4 gap-y-2 mb-4">{metrics.map(m => (<div key={m.id}><label className="flex items-center space-x-2 cursor-pointer font-bold"><input type="checkbox" checked={!!selectedChartItems[`metric-${m.id}`]} onChange={() => setSelectedChartItems(p => ({...p, [`metric-${m.id}`]: !p[`metric-${m.id}`]}))} className="form-checkbox h-5 w-5 rounded bg-accent border-gray-600 text-primary focus:ring-primary"/><span className="truncate">{m.metric_name}</span></label></div>))}</div>
                 <div style={{ width: '100%', height: 400 }}>
-                    <ResponsiveContainer>{(chartDataSource.length > 0 && metrics.length > 0) ? <ComposedChart data={chartDataSource} margin={{ top: 20, right: 20, left: 0, bottom: 5 }}><CartesianGrid strokeDasharray="3 3" stroke="#374151" /><XAxis dataKey="period_label" stroke="#d1d5db" /><YAxis stroke="#d1d5db" tickFormatter={valueFormatter} /><Tooltip contentStyle={{ backgroundColor: '#1f2937', border: '1px solid #374151' }} formatter={(value) => valueFormatter(value)} /><Legend />{metrics.filter(m => selectedChartItems[`metric-${m.id}`]).map((m, i) => (chartType === 'bar' ? (m.financial_subsegments.length > 0 ? (m.financial_subsegments.map((s, j) => <Bar key={s.id} dataKey={`subsegment-${s.id}`} name={s.subsegment_name} stackId={m.id} fill={COLORS[(i*3 + j) % COLORS.length]}>{j === m.financial_subsegments.length - 1 && (<LabelList content={(props: any) => renderStackTotalLabel(props, m)} />)}</Bar>)) : <Bar key={m.id} dataKey={`metric-${m.id}`} name={m.metric_name} fill={COLORS[i % COLORS.length]}><LabelList dataKey={`metric-${m.id}`} position="top" formatter={valueFormatter} style={{ fill: '#d1d5db', fontSize: 12 }} /></Bar>) : (m.financial_subsegments.length > 0 ? m.financial_subsegments.map((s, j) => <Line key={s.id} type="monotone" dataKey={`subsegment-${s.id}`} name={s.subsegment_name} stroke={COLORS[(i*3 + j) % COLORS.length]} ><LabelList dataKey={`subsegment-${s.id}`} position="top" formatter={valueFormatter} style={{ fill: '#d1d5db', fontSize: 12 }} offset={5} /></Line>) : <Line key={m.id} type="monotone" dataKey={`metric-${m.id}`} name={m.metric_name} stroke={COLORS[i % COLORS.length]} ><LabelList dataKey={`metric-${m.id}`} position="top" formatter={valueFormatter} style={{ fill: '#d1d5db', fontSize: 12 }} offset={5} /></Line>)))}</ComposedChart> : <div className="flex items-center justify-center h-full text-text-secondary">Add data and select metrics to see the chart.</div>}</ResponsiveContainer>
+                    <ResponsiveContainer>
+                        <ComposedChart data={chartData}>
+                            <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+                            <XAxis dataKey="period_label" stroke="#d1d5db" />
+                            <YAxis stroke="#d1d5db" tickFormatter={valueFormatter}/>
+                            <Tooltip formatter={valueFormatter}/>
+                            <Legend />
+                            {metrics.map((metric, index) => {
+                                if (!selectedChartItems[`metric-${metric.id}`]) return null;
+                                const ChartComponent = chartType === 'bar' ? Bar : Line;
+                                return <ChartComponent key={metric.id} dataKey={`metric-${metric.id}`} name={metric.metric_name} fill={COLORS[index % COLORS.length]} stroke={COLORS[index % COLORS.length]}>
+                                    <LabelList dataKey={`metric-${metric.id}`} position="top" formatter={valueFormatter} style={{ fill: '#d1d5db', fontSize: 12 }} />
+                                </ChartComponent>
+                            })}
+                        </ComposedChart>
+                    </ResponsiveContainer>
                 </div>
-                <ChartSummary annualData={annualChartData} metrics={metrics} selectedChartItems={selectedChartItems} />
             </Card>
 
-            <Card ref={tableCardRef} className={`transition-all duration-300 ${isEditMode ? 'border-2 border-primary shadow-lg shadow-primary/20' : ''}`}>
-                <div className="overflow-x-auto">
-                    <table className="w-full min-w-[800px] text-left">
-                        <thead><tr><th className="p-3 font-semibold sticky left-0 bg-content z-20 min-w-52">Metric / Sub-segment</th>{tablePeriods.map(p => (<th key={p.id} className="p-1 font-semibold text-center w-32">{activeTab === 'quarterly' ? <EditableHeader id={p.id} initialValue={p.period_label} onUpdate={handleNameUpdate.bind(null, 'period')} startInEditMode={p.id === newlyAddedId} onEditEnd={() => setNewlyAddedId(null)} onDelete={deleteItem.bind(null, 'period')} forceEditMode={isEditMode} isSaving={saveStatus === 'saving'} /> : <div className="p-1">{p.period_label}</div>}</th>))}{activeTab === 'quarterly' && <th className="p-1 w-24">{isEditMode && <Button onClick={addPeriod} variant="secondary" className="w-full text-xs"><Plus className="w-3 h-3 mr-1"/>Period</Button>}</th>}</tr></thead>
-                        <tbody>
-                            {metrics.map(metric => (
-                                <React.Fragment key={metric.id}>
-                                    <tr className="bg-content/50">
-                                        <td className="p-0 font-bold sticky left-0 bg-content z-10 min-w-52">
-                                            <div className="flex items-center">
-                                                {isEditMode && (
-                                                    <label className="pl-3 py-2 cursor-pointer">
-                                                        <input
-                                                            type="checkbox"
-                                                            checked={selectedMetricIds.includes(metric.id)}
-                                                            onChange={() => handleToggleMetricSelection(metric.id)}
-                                                            className="form-checkbox h-5 w-5 rounded bg-accent border-gray-600 text-primary focus:ring-primary shrink-0"
-                                                        />
-                                                    </label>
-                                                )}
-                                                <div className="flex-grow">
-                                                    <EditableHeader
-                                                        id={metric.id}
-                                                        initialValue={metric.metric_name}
-                                                        onUpdate={handleNameUpdate.bind(null, 'metric')}
-                                                        onDelete={isEditMode ? undefined : deleteItem.bind(null, 'metric')}
-                                                        isMetric
-                                                        forceEditMode={isEditMode}
-                                                        isSaving={saveStatus === 'saving'}
-                                                    />
-                                                </div>
-                                            </div>
-                                        </td>
-                                        {tablePeriods.map(p => <td key={p.id} className="p-1 w-32 text-right pr-3 font-semibold">{metric.financial_subsegments.length > 0 ? (activeTab === 'quarterly' ? valueFormatter(metric.financial_values.find(v => v.period_id === p.id)?.metric_value ?? 0) : valueFormatter(getAnnualValue(metric.id, null, p.period_label))) : (activeTab === 'quarterly' ? <FinancialInput stockId={stockId} metricId={metric.id} periodId={p.id} defaultValue={metric.financial_values.find(v => v.period_id === p.id)?.metric_value ?? null} disabled={!isEditMode} /> : <div className="w-full bg-transparent p-2 text-right rounded">{valueFormatter(getAnnualValue(metric.id, null, p.period_label))}</div>)}</td>)}
-                                        {activeTab === 'quarterly' && <td></td>}
-                                    </tr>
-                                    {metric.financial_subsegments.map(sub => (
-                                        <tr key={sub.id} className="hover:bg-accent/20">
-                                            <td className="p-2 pl-6 sticky left-0 bg-content z-10 w-52"><EditableHeader id={sub.id} initialValue={sub.subsegment_name} onUpdate={handleNameUpdate.bind(null, 'sub')} onDelete={deleteItem.bind(null, 'sub')} isMetric forceEditMode={isEditMode} isSaving={saveStatus === 'saving'} /></td>
-                                            {tablePeriods.map(p => <td key={p.id} className="p-1 w-32">{activeTab === 'quarterly' ? <FinancialInput stockId={stockId} metricId={metric.id} periodId={p.id} subsegmentId={sub.id} defaultValue={sub.financial_values.find(v => v.period_id === p.id)?.metric_value ?? null} disabled={!isEditMode} onSaveSuccess={() => handleSaveSuccess(metric.id, p.id)}/> : <div className="w-full bg-transparent p-2 text-right rounded">{valueFormatter(getAnnualValue(metric.id, sub.id, p.period_label))}</div>}</td>)}
-                                            {activeTab === 'quarterly' && <td></td>}
-                                        </tr>
-                                    ))}
-                                    {isEditMode && activeTab === 'quarterly' && <tr><td colSpan={periods.length + 2} className="py-1 pl-6"><Button onClick={() => addSubsegment(metric.id)} variant="secondary" className="text-xs px-2 py-1"><Plus className="w-3 h-3 mr-1"/>Add Subsegment</Button></td></tr>}
-                                </React.Fragment>
-                            ))}
-                        </tbody>
-                    </table>
+            {activeTab === 'annual' && <ChartSummary annualData={annualChartData} metrics={metrics} selectedChartItems={selectedChartItems} />}
+            
+            <Card ref={tableCardRef} className="mt-6 overflow-x-auto">
+                <div className="flex justify-end mb-4 gap-2">
+                    <Button ref={editModeButtonRef} variant={isEditMode ? 'primary' : 'secondary'} size="sm" onClick={() => setIsEditMode(prev => !prev)}>
+                        {isEditMode ? 'Done Editing' : 'Edit Names & Periods'}
+                    </Button>
                 </div>
-                {isEditMode && <div className="mt-4"><Button onClick={addMetric} variant="secondary"><Plus className="w-4 h-4 mr-2"/>Add Metric</Button></div>}
+                
+                {isEditMode && selectedMetricIds.length > 0 && (
+                     <div ref={floatingPanelRef} className="sticky left-4 z-10 p-2 bg-content-dark rounded-lg shadow-lg w-max flex items-center gap-2 mb-4 border border-accent">
+                        <span className="text-sm font-medium">{selectedMetricIds.length} metric(s) selected</span>
+                        <Button variant="danger" size="sm" onClick={handleDeleteSelectedMetrics}>Delete</Button>
+                     </div>
+                )}
+
+                <table className="w-full text-left">
+                    <thead>
+                        <tr>
+                            <th className="sticky left-0 bg-content p-2 min-w-[250px] z-10">Metric</th>
+                            {currentPeriods.map(p => (
+                                <th key={p.id} className="p-2 text-center min-w-[150px]">
+                                    <EditableHeader
+                                        id={p.id}
+                                        initialValue={p.period_label}
+                                        onUpdate={(id, val) => handleNameUpdate('period', id, val)}
+                                        forceEditMode={isEditMode}
+                                        onDelete={() => deleteItem('period', p.id)}
+                                        startInEditMode={newlyAddedId === p.id}
+                                        onEditEnd={() => setNewlyAddedId(null)}
+                                    />
+                                </th>
+                            ))}
+                            <th className="p-2">
+                                <Button size="sm" variant="secondary" onClick={addPeriodHandler}><Plus className="w-4 h-4"/></Button>
+                            </th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {metrics.map(metric => (
+                            <React.Fragment key={metric.id}>
+                                <tr className="bg-content-dark">
+                                    <td className="sticky left-0 bg-content-dark p-2 font-bold flex items-center gap-2">
+                                        {isEditMode && (
+                                            <input
+                                                type="checkbox"
+                                                checked={selectedMetricIds.includes(metric.id)}
+                                                onChange={() => handleToggleMetricSelection(metric.id)}
+                                                className="form-checkbox h-4 w-4 rounded bg-accent border-gray-600 text-primary focus:ring-primary"
+                                            />
+                                        )}
+                                        <input type="checkbox" className="form-checkbox h-4 w-4 rounded bg-accent border-gray-600 text-primary focus:ring-primary" checked={selectedChartItems[`metric-${metric.id}`] || false} onChange={e => setSelectedChartItems(prev => ({...prev, [`metric-${metric.id}`]: e.target.checked}))} />
+                                        <div className="flex-1">
+                                            <EditableHeader
+                                                id={metric.id}
+                                                initialValue={metric.metric_name}
+                                                onUpdate={(id, val) => handleNameUpdate('metric', id, val)}
+                                                forceEditMode={isEditMode}
+                                                onDelete={() => deleteItem('metric', metric.id)}
+                                                isMetric
+                                            />
+                                        </div>
+                                    </td>
+                                    {currentPeriods.map(p => {
+                                        const value = metric.financial_values.find(v => v.period_id === p.id && v.subsegment_id === null);
+                                        return <td key={p.id} className="p-0 border-l border-accent"><FinancialInput stockId={stockId} metricId={metric.id} periodId={p.id} defaultValue={value?.metric_value ?? null} disabled={metric.financial_subsegments.length > 0} /></td>;
+                                    })}
+                                    <td className="p-2 border-l border-accent">
+                                        <Button size="sm" variant="secondary" onClick={() => addSubsegment(metric.id)}><Plus className="w-4 h-4"/></Button>
+                                    </td>
+                                </tr>
+                                {metric.financial_subsegments.map(sub => (
+                                    <tr key={sub.id}>
+                                        <td className="sticky left-0 bg-content pl-10 p-2 flex items-center">
+                                            <EditableHeader
+                                                id={sub.id}
+                                                initialValue={sub.subsegment_name}
+                                                onUpdate={(id, val) => handleNameUpdate('sub', id, val)}
+                                                forceEditMode={isEditMode}
+                                                onDelete={() => deleteItem('sub', sub.id)}
+                                                isMetric
+                                            />
+                                        </td>
+                                        {currentPeriods.map(p => {
+                                            const value = sub.financial_values.find(v => v.period_id === p.id);
+                                            return <td key={p.id} className="p-0 border-l border-accent"><FinancialInput stockId={stockId} metricId={metric.id} periodId={p.id} subsegmentId={sub.id} defaultValue={value?.metric_value ?? null} onSaveSuccess={() => handleSaveSuccess(metric.id, p.id)} /></td>;
+                                        })}
+                                        <td className="border-l border-accent"></td>
+                                    </tr>
+                                ))}
+                            </React.Fragment>
+                        ))}
+                    </tbody>
+                </table>
+                <div className="mt-4">
+                    <Button onClick={addMetric}><Plus className="w-4 h-4 mr-2"/>Add Metric</Button>
+                </div>
             </Card>
-            <Toast status={saveStatus} message={toastText}/>
+
+            <Toast status={saveStatus} message={toastText} />
         </div>
     );
 };
