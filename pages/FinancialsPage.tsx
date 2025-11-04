@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { supabase } from '../services/supabaseClient';
@@ -332,8 +333,11 @@ const FinancialsPageContent: React.FC = () => {
             if (metricError) throw metricError;
             if (!newMetricData) throw new Error("Failed to get data for new metric.");
     
+            // Create placeholder values for all existing periods
+            const newFinancialValues: FinancialValue[] = [];
             if (periods.length > 0) {
                  for (const period of periods) {
+                    // This call persists the placeholder value in the DB
                     await saveFinancialValue({
                         id: '', // Not needed for save function
                         stock_id: stockId,
@@ -342,10 +346,25 @@ const FinancialsPageContent: React.FC = () => {
                         subsegment_id: null,
                         metric_value: null,
                     });
+                    // This creates a local object for the optimistic UI update
+                    newFinancialValues.push({
+                        id: crypto.randomUUID(), // Temp ID for local state rendering
+                        stock_id: stockId,
+                        metric_id: newMetricData.id,
+                        period_id: period.id,
+                        subsegment_id: null,
+                        metric_value: null,
+                        created_at: new Date().toISOString(),
+                    });
                 }
             }
     
-            const newMetric: FinancialMetric = { ...newMetricData, financial_subsegments: [], financial_values: [] };
+            // Add the new metric to local state, now with its placeholder value objects
+            const newMetric: FinancialMetric = { 
+                ...newMetricData, 
+                financial_subsegments: [], 
+                financial_values: newFinancialValues 
+            };
             setMetrics(prev => [...prev, newMetric]);
             showToast('saved', 'Metric added successfully.');
         } catch (err) {
@@ -429,6 +448,24 @@ const FinancialsPageContent: React.FC = () => {
         }
     
         showToast('saving', 'Adding period...');
+
+        const tempId = crypto.randomUUID();
+        
+        const getYearFromLabel = (label: string): number => {
+            const match = label.match(/\b(\d{4})\b/);
+            return match ? parseInt(match[1], 10) : new Date().getFullYear();
+        };
+
+        // Optimistic UI update
+        const optimisticPeriod: FinancialPeriod = {
+            id: tempId,
+            stock_id: stockId,
+            period_label: newLabel,
+            period_type: 'quarter',
+            display_order: getYearFromLabel(newLabel),
+            created_at: new Date().toISOString(),
+        };
+        setPeriods(prev => [...prev, optimisticPeriod]);
         
         const result = await ensurePeriodExistsAndLink({
             stockId,
@@ -437,14 +474,16 @@ const FinancialsPageContent: React.FC = () => {
             metrics,
         });
     
-        if (!result.ok || !result.data) {
+        if (!result.ok || !result.period) {
             showToast('error', result.error?.message || 'Failed to add period.');
+            // Revert optimistic update
+            setPeriods(prev => prev.filter(p => p.id !== tempId));
             return;
         }
     
         await fetchData(); // Refresh all data to ensure UI consistency
-        setNewlyAddedId(result.data.id);
-        showToast('saved', 'Period added successfully');
+        setNewlyAddedId(result.period.id);
+        showToast('saved', `Period added. Placeholders: ${result.created_count}`);
     };
     
     const deleteItem = async (type: 'metric' | 'sub' | 'period', id: string) => {

@@ -77,7 +77,63 @@ A simple, clean, and fast web application for conducting and saving personal sto
 
 ---
 
-## 3. How It Works
+### Service Layer, Seeding, and Testing
+
+This project includes a robust service layer for interacting with the Supabase database, along with scripts for seeding test data and running unit tests.
+
+#### Seeding the Database
+
+A seed script is provided to populate your database with initial data for a test stock (`TEST`). This is useful for development and manual testing.
+
+**To run the seed script:**
+
+1.  Navigate to your Supabase project dashboard.
+2.  Go to the **SQL Editor**.
+3.  Click **"New query"**.
+4.  Copy the entire content of `scripts/seed_financial_test_data.sql`.
+5.  Paste the SQL into the editor and click **`RUN`**. The script is idempotent and can be run multiple times.
+
+#### Running Tests
+
+Unit tests for the service layer are written using Jest. They mock the Supabase client and do not require a running database. Ensure you have Jest installed as a dev dependency (`npm install --save-dev jest @types/jest ts-jest`).
+
+**To run the tests:**
+
+```bash
+# Make sure your package.json has a "test" script: "test": "jest"
+npm test
+```
+
+---
+
+## 3. Troubleshooting
+
+### Error: "Failed to add and link financial period: A period with this name already exists for another stock."
+
+If you encounter this specific error when trying to add a financial period (e.g., "Q1 2025") to a second stock after it already exists for another, it is because your database schema is enforcing a *global* unique constraint on period names.
+
+The application is designed to allow per-stock periods, but the initial schema had an overly restrictive rule.
+
+**How to Fix:**
+
+You need to run a single SQL command in your Supabase project to remove this constraint. This is a one-time fix.
+
+1.  Navigate to your project in the [Supabase Dashboard](https://supabase.com/dashboard).
+2.  Go to the **SQL Editor** in the left sidebar.
+3.  Click **"New query"**.
+4.  Copy and paste the following command into the editor:
+
+    ```sql
+    ALTER TABLE public.financial_period DROP CONSTRAINT financial_period_unique_label_type;
+    ```
+
+5.  Click **`RUN`**.
+
+After running this command, the error will be resolved, and you can add the same period to multiple stocks as intended. The application will still prevent you from adding the same period to the *same stock* twice, which is the correct behavior.
+
+---
+
+## 4. How It Works
 
 - **Data Fetching:** The app uses the Supabase JS client to fetch data directly from your tables.
 - **RLS Policies:** The app works without login because of the Row Level Security policies you set up in step 1.3. These policies explicitly grant the public anonymous key (`anon` role) permission to select, insert, update, and delete records.
